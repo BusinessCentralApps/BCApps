@@ -246,10 +246,14 @@ workspace compilation, `testType` `Legacy` (demo data generated through a page
 action), and the RU projects (company initialization must be interleaved with the
 app installation). Upgrade testing from the previous release is not performed.
 
-The fork sets `gitHubRunner` to `windows-2022` for `BusinessCentralApps/BCApps`
-(`.github\CICD.settings.json`, `.github\Pull Request Build.settings.json`) because
+The build jobs of the `CI/CD` and `Pull Request Build` workflows run on `windows-2022`
+(`gitHubRunner` in the `repositories: ["BCApps"]` conditional settings of
+`.github\CICD.settings.json` and `.github\Pull Request Build.settings.json`) because
 the container image is based on `servercore:ltsc2022` and runs with process
-isolation.
+isolation. The workflow settings files are merged after the project settings, so
+this replaces the projects' `GitHub-BCAppsPL` runner. AL-Go matches `repositories`
+against the repository name without its owner, so the condition cannot tell a fork
+from `microsoft/BCApps`.
 
 ## Environment artifacts
 

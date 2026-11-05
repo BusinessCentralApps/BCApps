@@ -476,3 +476,23 @@ Describe "Get-BcDevEnvPlatformLayout and Find-BcDevEnvAlc" {
         { Get-BcDevEnvPlatformLayout -PlatformDir (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'empty') -Force).FullName } | Should -Throw '*System.app*'
     }
 }
+
+Describe "Workflow runner settings" {
+    It "selects windows-2022 for the build jobs of <File> in BusinessCentralApps/BCApps" -TestCases @(
+        @{ File = 'CICD.settings.json' }
+        @{ File = 'Pull Request Build.settings.json' }
+    ) {
+        param($File)
+        # AL-Go's ReadSettings matches the 'repositories' condition against the repository name without the owner,
+        # and the workflow settings file is merged after the project settings (which set gitHubRunner: GitHub-BCAppsPL).
+        $repoName = 'BusinessCentralApps/BCApps'
+        $repoName = $repoName.Substring($repoName.LastIndexOf('/') + 1)
+        $settings = Get-Content -Raw -Path (Join-Path $PSScriptRoot "../../../.github/$File") | ConvertFrom-Json
+        $runners = @($settings.conditionalSettings | Where-Object {
+            $_.PSObject.Properties.Name -contains 'repositories' -and
+            $_.settings.PSObject.Properties.Name -contains 'gitHubRunner' -and
+            @($_.repositories | Where-Object { $repoName -like $_ }).Count -gt 0
+        } | ForEach-Object { $_.settings.gitHubRunner })
+        $runners | Should -Be @('windows-2022')
+    }
+}

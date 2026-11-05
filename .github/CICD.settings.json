@@ -34,7 +34,7 @@
     },
     {
       "repositories": [
-        "BusinessCentralApps/BCApps"
+        "BCApps"
       ],
       "settings": {
         "gitHubRunner": "windows-2022"
