@@ -39,13 +39,23 @@ public static class BuildImageCommand
         if (!string.IsNullOrWhiteSpace(registry)) tag = $"{registry.TrimEnd('/')}/{tag}";
 
         var toolRoot = ToolRoot();
+
+        // License + bake-time apps are resolved up front so that an image that cannot be provisioned
+        // fails before anything is staged.
+        var license = a.Get("license") ?? Environment.GetEnvironmentVariable("BCDEVENV_LICENSE");
+        if (!string.IsNullOrWhiteSpace(license) && !File.Exists(license))
+            throw new BcDevEnvException($"License file not found: '{license}'.");
+        var appFiles = NavAppService.ResolveAppFiles(a.GetAll("app-file").Concat(ReadAppList(a.Get("app-list"))));
+        var licenseWarning = CheckLicense(
+            hasLicense: !string.IsNullOrWhiteSpace(license),
+            emptyDatabase: manifest != null && a.Get("bak") == null,
+            appCount: appFiles.Count);
+
         var context = Path.Combine(manifest != null ? Paths.EnvPath(manifest.Name) : Path.GetTempPath(), "image-context");
         PrepareCleanDir(context);
 
-        // 1. Dockerfile.
-        var dockerfileSrc = Path.Combine(toolRoot, "container", "Dockerfile");
-        var dockerfile = Path.Combine(context, "Dockerfile");
-        File.Copy(dockerfileSrc, dockerfile, overwrite: true);
+        // 1. Dockerfile + the files its early layers COPY.
+        var dockerfile = StageContainerFiles(toolRoot, context);
 
         // 2. Database backup.
         var dbDir = Path.Combine(context, "db");
@@ -70,11 +80,8 @@ public static class BuildImageCommand
         // found). They ship OUTSIDE the Service folder (platform\Test Assemblies\Mock Assemblies).
         StageTestMockAssemblies(Path.Combine(context, "binaries", "Service", "Add-Ins"));
 
-        // 4. License (optional).
+        // 4. License (optional, see CheckLicense).
         string? licenseLeaf = null;
-        var license = a.Get("license") ?? Environment.GetEnvironmentVariable("BCDEVENV_LICENSE");
-        if (!string.IsNullOrWhiteSpace(license) && !File.Exists(license))
-            throw new BcDevEnvException($"License file not found: '{license}'.");
         if (!string.IsNullOrWhiteSpace(license))
         {
             var licDir = Path.Combine(context, "license");
@@ -85,7 +92,6 @@ public static class BuildImageCommand
 
         // 5. Bake-time apps (.app files only), installed in the order given.
         var appLeaves = new List<string>();
-        var appFiles = NavAppService.ResolveAppFiles(a.GetAll("app-file").Concat(ReadAppList(a.Get("app-list"))));
         if (appFiles.Count > 0)
         {
             var appDir = Path.Combine(context, "apps");
@@ -116,8 +122,7 @@ public static class BuildImageCommand
             ServerSettings = BuildManifest.ParseServerSettings(a.GetAll("server-setting")),
         }.Save(Path.Combine(context, "build-manifest.json"));
 
-        if (licenseLeaf == null)
-            Log.Warn("No license baked into the image; provisioning relies on the platform's built-in license.");
+        if (licenseWarning != null) Log.Warn(licenseWarning);
 
         // 8. docker build.
         Log.Info($"Building image '{tag}' (base={baseImage})...");
@@ -132,6 +137,44 @@ public static class BuildImageCommand
             Log.Success($"Pushed '{tag}'.");
         }
         return 0;
+    }
+
+    /// <summary>Files from the tool's container folder that the Dockerfile COPYs from the context root.</summary>
+    public static readonly string[] ContainerSetupFiles = { "Install-SqlExpress.ps1" };
+
+    /// <summary>
+    /// Copies the Dockerfile and the setup scripts its early (cached) layers COPY into the context
+    /// root; returns the staged Dockerfile path.
+    /// </summary>
+    public static string StageContainerFiles(string toolRoot, string context)
+    {
+        var containerDir = Path.Combine(toolRoot, "container");
+        foreach (var leaf in ContainerSetupFiles.Prepend("Dockerfile"))
+        {
+            var source = Path.Combine(containerDir, leaf);
+            if (!File.Exists(source)) throw new BcDevEnvException($"Container file not found: '{source}'.");
+            File.Copy(source, Path.Combine(context, leaf), overwrite: true);
+        }
+        return Path.Combine(context, "Dockerfile");
+    }
+
+    /// <summary>
+    /// Business Central refuses to publish apps without a license, and the database of a create-env
+    /// environment (an empty platform database) holds none: baking apps into it without --license
+    /// fails here instead of deep inside 'docker build'. Otherwise returns the warning to log when
+    /// no license is baked (null when one is).
+    /// </summary>
+    public static string? CheckLicense(bool hasLicense, bool emptyDatabase, int appCount)
+    {
+        if (hasLicense) return null;
+        if (emptyDatabase && appCount > 0)
+            throw new BcDevEnvException(
+                $"No license to bake: the environment's database is an empty platform database (create-env) that holds no license, " +
+                $"and Business Central does not publish the {appCount} bake-time app(s) without one. Pass --license (or set " +
+                "BCDEVENV_LICENSE), e.g. the CRONUS license (Cronus.bclicense) of a Business Central application artifact.");
+        return emptyDatabase
+            ? "No license baked into the image; the empty create-env database holds none, so apps cannot be published into the container."
+            : "No license baked into the image; provisioning relies on a license already stored in the database backup.";
     }
 
     /// <summary>Reads an --app-list file: one .app path per line; blank lines and '#' comments are ignored.</summary>

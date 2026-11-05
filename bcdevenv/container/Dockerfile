@@ -6,13 +6,15 @@
 # database rebuilt from that same platform version, so the DB schema and the
 # binaries can never drift.
 #
-# All in-image logic is the self-contained bcdevenv .NET CLI (no PowerShell
-# scripts baked in). The build context (staged by 'bcdevenv build-image') holds:
+# In-image provisioning logic is the self-contained bcdevenv .NET CLI; the only
+# script is the SQL Server Express setup. The build context (staged by
+# 'bcdevenv build-image') holds:
+#   Install-SqlExpress.ps1     - SQL Server Express setup (shared with the CI runner)
 #   db\<database>.bak          - the freshly built DB (.bak)
 #   binaries\Service\*         - specified-version service tier binaries
 #   binaries\WebClient\*       - specified-version web client binaries (optional)
 #   apps\*.app                 - optional bake-time app packages
-#   license\*.bclicense        - license (optional)
+#   license\*.bclicense        - license (required when apps are baked into an empty create-env DB)
 #   build-manifest.json        - DB name, country, instance, credential type, apps
 #   cli\*                      - the self-contained bcdevenv CLI (provision + serve)
 #
@@ -33,24 +35,34 @@ ENV BCDEVENV_MGMT_DIR=C:\\bc\\Service\\Admin
 ENV BCDEVENV_INSTANCE=BC
 
 # ---------------------------------------------------------------------------
-# 1. Install Chocolatey + SQL Server Express (engine only), with TCP enabled.
-#    This mirrors the host CI setup (build/scripts/Initialize-SqlServer.ps1),
-#    which is a proven-working install path.
+# 1. SQL Server Express (engine only), installed by Install-SqlExpress.ps1 from
+#    Microsoft's download: SHA256-checked and retried, success judged by the
+#    instance service starting (not by exit codes), a failed setup diagnosed,
+#    cleaned up and retried. The same script installs SQL on the CI runner. It
+#    is copied on its own so this layer stays cached across contexts.
 # ---------------------------------------------------------------------------
-RUN iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-RUN choco install sql-server-express -y --no-progress; if ($LASTEXITCODE -ne 0) { throw 'sql-server-express install failed' }
+COPY Install-SqlExpress.ps1 C:/bcdevenv-setup/
+RUN & C:\bcdevenv-setup\Install-SqlExpress.ps1 -InstanceName SQLEXPRESS -WorkFolder C:\bcdevenv-setup\sqlexpress; exit 0
 
-# The BC server + management tool are framework-dependent .NET 8 apps
-# (Microsoft.NETCore.App 8.0 + Microsoft.AspNetCore.App 8.0), so the base image
-# (Windows Server Core has no .NET) needs the ASP.NET Core 8 runtime before
-# provisioning registers/starts the server instance.
 # The BC server targets .NET 8 (ASP.NET Core 8) and the management tool
 # (Microsoft.BusinessCentral.ManagementTool.exe) targets .NET 10
 # (Microsoft.NETCore.App 10.0). The base image (Windows Server Core) has no .NET,
 # so install both runtimes with Microsoft's canonical dotnet-install script into
-# the default location the apphosts probe.
-RUN Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile C:\dotnet-install.ps1; & C:\dotnet-install.ps1 -Channel 8.0 -Runtime aspnetcore -InstallDir 'C:\Program Files\dotnet'; if (-not (Test-Path 'C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App')) { throw '.NET 8 runtime install failed' }
-RUN & C:\dotnet-install.ps1 -Channel 10.0 -Runtime aspnetcore -InstallDir 'C:\Program Files\dotnet'; if (-not (Test-Path 'C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App')) { throw '.NET 10 runtime install failed' }
+# the default location the apphosts probe. Retried (the script download itself
+# has no retry), and verified by the installed runtime version folder.
+RUN foreach ($channel in '8.0', '10.0') { \
+      $installed = $false; \
+      for ($attempt = 1; $attempt -le 5 -and -not $installed; $attempt++) { \
+        try { \
+          Invoke-WebRequest -UseBasicParsing 'https://dot.net/v1/dotnet-install.ps1' -OutFile C:\dotnet-install.ps1; \
+          & C:\dotnet-install.ps1 -Channel $channel -Runtime aspnetcore -InstallDir 'C:\Program Files\dotnet'; \
+          $installed = Test-Path ('C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App\' + $channel.Split('.')[0] + '.*'); \
+        } catch { Write-Host ('dotnet-install ' + $channel + ' attempt ' + $attempt + ' failed: ' + $_) }; \
+        if (-not $installed) { Start-Sleep -Seconds (15 * $attempt) } \
+      }; \
+      if (-not $installed) { throw ('ASP.NET Core ' + $channel + ' runtime install failed') } \
+    }; \
+    Remove-Item C:\dotnet-install.ps1 -Force
 
 # ---------------------------------------------------------------------------
 # 2. Lay down the build context + stage the baked binaries.

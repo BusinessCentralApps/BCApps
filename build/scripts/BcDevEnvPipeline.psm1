@@ -234,6 +234,110 @@ function Get-BcDevEnvResourceNames {
 
 <#
 .SYNOPSIS
+    Runs a script block and retries it with exponential backoff when it throws.
+.DESCRIPTION
+    For the transient infrastructure failures seen on hosted runners (truncated downloads, gateway
+    timeouts, ...). The script block receives the attempt number as its first argument. After the last
+    attempt the error is rethrown with the description and the attempt count.
+#>
+function Invoke-BcDevEnvWithRetry {
+    param(
+        [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
+        [Parameter(Mandatory = $true)] [string] $Description,
+        [ValidateRange(1, 100)] [int] $MaxAttempts = 5,
+        [ValidateRange(0, 3600)] [int] $InitialDelaySeconds = 10,
+        [ValidateRange(0, 3600)] [int] $MaxDelaySeconds = 120
+    )
+
+    $retryDelay = $InitialDelaySeconds
+    for ($retryAttempt = 1; ; $retryAttempt++) {
+        try {
+            $retryResult = & $ScriptBlock $retryAttempt
+            return $retryResult
+        }
+        catch {
+            $retryMessage = $_.Exception.Message
+            if ($retryAttempt -ge $MaxAttempts) {
+                throw "$Description failed after $MaxAttempts attempt(s): $retryMessage"
+            }
+            Write-Host "$Description failed (attempt $retryAttempt of $MaxAttempts): $retryMessage Retrying in $retryDelay second(s)."
+            Start-Sleep -Seconds $retryDelay
+            $retryDelay = [Math]::Min($retryDelay * 2, $MaxDelaySeconds)
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks a downloaded file: it must exist and be non-empty, and optionally match a SHA256 hash and
+    be a readable zip archive (a truncated zip has no readable central directory).
+#>
+function Test-BcDevEnvDownloadedFile {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [string] $Sha256 = '',
+        [switch] $ValidateZip
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "The download did not produce '$Path'." }
+    $length = (Get-Item -LiteralPath $Path).Length
+    if ($length -le 0) { throw "The downloaded file '$Path' is empty." }
+    if ($Sha256) {
+        $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        if ($actual -ne $Sha256) { throw "The downloaded file '$Path' ($length bytes) has SHA256 $actual; expected $Sha256." }
+    }
+    if ($ValidateZip) {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $entryCount = 0
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            try { $entryCount = $zip.Entries.Count } finally { $zip.Dispose() }
+        }
+        catch {
+            throw "The downloaded file '$Path' ($length bytes) is not a valid zip archive: $($_.Exception.Message)"
+        }
+        if ($entryCount -eq 0) { throw "The downloaded zip archive '$Path' ($length bytes) has no entries." }
+    }
+}
+
+<#
+.SYNOPSIS
+    Downloads a file with retries: a failed or invalid attempt (see Test-BcDevEnvDownloadedFile) deletes
+    the partial file and is retried with exponential backoff.
+#>
+function Save-BcDevEnvDownload {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [Parameter(Mandatory = $true)] [string] $OutFile,
+        [string] $Description = '',
+        [string] $Sha256 = '',
+        [switch] $ValidateZip,
+        [ValidateRange(1, 100)] [int] $MaxAttempts = 5,
+        [ValidateRange(0, 3600)] [int] $InitialDelaySeconds = 10,
+        [int] $TimeoutSec = 3600
+    )
+
+    if (-not $Description) { $Description = "Downloading '$(([System.Uri]$Uri).GetLeftPart([System.UriPartial]::Path))'" }
+    $parent = Split-Path -Parent $OutFile
+    if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    Invoke-BcDevEnvWithRetry -Description $Description -MaxAttempts $MaxAttempts -InitialDelaySeconds $InitialDelaySeconds -ScriptBlock {
+        if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec | Out-Null
+            Test-BcDevEnvDownloadedFile -Path $OutFile -Sha256 $Sha256 -ValidateZip:$ValidateZip
+        }
+        catch {
+            Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            throw
+        }
+    } | Out-Null
+    $file = Get-Item -LiteralPath $OutFile
+    Write-Host "Downloaded $($file.Length) bytes to '$OutFile'."
+    return $file.FullName
+}
+
+<#
+.SYNOPSIS
     Decodes one secret from the AL-Go ReadSecrets output ($env:Secrets: JSON, base64 values).
 #>
 function Get-BcDevEnvSecretValue {
@@ -274,8 +378,9 @@ function Get-BcDevEnvLicenseExtension {
       * an http(s) URL to the license file (AL-Go licenseFileUrl semantics),
       * a gzip-compressed, base64-encoded license file (value starting with H4sI),
       * a path to a license file on the runner.
-    When the secret is absent or empty a warning is written and $null is returned: the container
-    then uses the platform's built-in license. The secret value is never written to the log.
+    When the secret is absent or empty a warning is written and $null is returned: the pipeline
+    then uses the CRONUS license of the AL-Go application artifact (Get-BcDevEnvArtifactLicense),
+    because an empty platform database holds no license. The secret value is never written to the log.
 .OUTPUTS
     Full path of the restored license file, or $null.
 #>
@@ -289,7 +394,7 @@ function Resolve-BcDevEnvLicense {
     if ([string]::IsNullOrWhiteSpace($SecretName)) { $SecretName = 'licenseFileUrl' }
     $value = Get-BcDevEnvSecretValue -SecretsJson $SecretsJson -Name $SecretName
     if ([string]::IsNullOrWhiteSpace($value)) {
-        Write-Warning "No license secret '$SecretName' is available. The container uses the platform's built-in license; if publishing, installing or running tests needs more, provide a license through the '$SecretName' secret (or map another secret with the AL-Go licenseFileUrlSecretName setting)."
+        Write-Warning "No license secret '$SecretName' is available. The CRONUS license of the AL-Go application artifact is used instead; if publishing, installing or running tests needs more, provide a license through the '$SecretName' secret (or map another secret with the AL-Go licenseFileUrlSecretName setting)."
         return $null
     }
 
@@ -300,10 +405,14 @@ function Resolve-BcDevEnvLicense {
         $download = Join-Path $Destination "license-download-$([guid]::NewGuid().ToString('N')).tmp"
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
         try {
-            Invoke-WebRequest -Uri $value -OutFile $download -UseBasicParsing -TimeoutSec 300 | Out-Null
+            # The URL is secret: only the exception type is reported.
+            Invoke-BcDevEnvWithRetry -Description "Downloading the license referenced by secret '$SecretName'" -MaxAttempts 3 -ScriptBlock {
+                try { Invoke-WebRequest -Uri $value -OutFile $download -UseBasicParsing -TimeoutSec 300 | Out-Null }
+                catch { throw "download failed ($($_.Exception.GetType().Name))" }
+            } | Out-Null
         }
         catch {
-            throw "Could not download the license referenced by secret '$SecretName' ($($_.Exception.GetType().Name))."
+            throw "Could not download the license referenced by secret '$SecretName' ($($_.Exception.Message))."
         }
         try { $bytes = [System.IO.File]::ReadAllBytes($download) }
         finally { Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue }
@@ -338,6 +447,307 @@ function Resolve-BcDevEnvLicense {
     $path = Join-Path $Destination ("license" + (Get-BcDevEnvLicenseExtension -Bytes $bytes))
     [System.IO.File]::WriteAllBytes($path, $bytes)
     Write-Host "Restored the license from secret '$SecretName' ($source) to '$path'."
+    return $path
+}
+
+<#
+.SYNOPSIS
+    Returns the AL-Go application artifact URL whose CRONUS license is used when no license secret is
+    available.
+.DESCRIPTION
+    Prefers the URL resolved by AL-Go's DetermineArtifactUrl action ($env:artifact). Otherwise the AL-Go
+    'artifact' setting is used: a URL as is, or storageAccount/type/version/country/select, where an
+    empty country falls back to the 'country' setting and then to 'base', and a partial version is
+    resolved to the latest (or, with select 'first', the earliest) matching version from the artifact
+    index.
+#>
+function Get-BcDevEnvApplicationArtifactUrl {
+    param(
+        [AllowEmptyString()] [AllowNull()] [string] $ResolvedArtifactUrl,
+        [AllowNull()] $Settings
+    )
+
+    $resolved = "$ResolvedArtifactUrl".Trim()
+    if ($resolved -match '^https?://') { return $resolved }
+    $artifact = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'artifact' -Default '')
+    $artifact = $artifact.Trim()
+    if ($artifact -match '^https?://') { return $artifact }
+
+    $parts = @($artifact.Split('/'))
+    if ($parts.Count -lt 3 -or -not $parts[0] -or -not $parts[1]) {
+        throw "Cannot determine the AL-Go application artifact for the CRONUS license: the 'artifact' setting '$artifact' is not a URL or storageAccount/type/version/country/select. Provide a license through the license secret instead."
+    }
+    $hosts = @{
+        'bcinsider'   = 'https://bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net'
+        'bcartifacts' = 'https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net'
+    }
+    $storageAccount = $parts[0].ToLowerInvariant() -replace '\.azureedge\.net$', '' -replace '\.blob\.core\.windows\.net$', ''
+    if (-not $hosts.ContainsKey($storageAccount)) {
+        throw "Cannot determine the AL-Go application artifact for the CRONUS license: storage account '$($parts[0])' is not supported (bcinsider, bcartifacts). Provide a license through the license secret instead."
+    }
+    $baseUrl = $hosts[$storageAccount]
+    $type = $parts[1].ToLowerInvariant()
+    $version = $parts[2].Trim()
+    $country = if ($parts.Count -gt 3) { $parts[3].Trim() } else { '' }
+    if (-not $country) { $country = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'country' -Default '') }
+    if (-not $country) { $country = 'base' }
+    $country = $country.ToLowerInvariant()
+    $select = if ($parts.Count -gt 4 -and $parts[4]) { $parts[4].ToLowerInvariant() } else { 'latest' }
+
+    if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+        $indexUrl = "$baseUrl/$type/indexes/$country.json"
+        $index = Invoke-BcDevEnvWithRetry -Description "Reading the artifact index '$indexUrl'" -MaxAttempts 3 -ScriptBlock {
+            Invoke-RestMethod -Uri $indexUrl -UseBasicParsing -TimeoutSec 120
+        }
+        $candidates = @(@($index) | ForEach-Object { [string]$_.Version } |
+                Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and (-not $version -or $_ -eq $version -or $_.StartsWith("$version.")) } |
+                Sort-Object { [version]$_ })
+        if ($candidates.Count -eq 0) { throw "No $type artifact version matching '$version' for country '$country' in '$indexUrl'." }
+        $version = if ($select -eq 'first') { $candidates[0] } else { $candidates[-1] }
+    }
+    return "$baseUrl/$type/$version/$country"
+}
+
+<#
+.SYNOPSIS
+    Picks the license entry of an application artifact: the manifest's licenseFile, else
+    Cronus.bclicense, else Cronus.flf (names compared case-insensitively, also by file name).
+#>
+function Select-BcDevEnvArtifactLicenseEntry {
+    param(
+        [AllowEmptyCollection()] [string[]] $EntryNames = @(),
+        [AllowEmptyString()] [AllowNull()] [string] $ManifestJson
+    )
+
+    $wanted = @()
+    if (-not [string]::IsNullOrWhiteSpace($ManifestJson)) {
+        try {
+            $licenseFile = [string](Get-BcDevEnvSetting -Settings ($ManifestJson | ConvertFrom-Json) -Name 'licenseFile' -Default '')
+            if ($licenseFile) { $wanted += $licenseFile }
+        }
+        catch {
+            Write-Host "The artifact manifest.json could not be read: $($_.Exception.Message)"
+        }
+    }
+    $wanted += @('Cronus.bclicense', 'Cronus.flf')
+    foreach ($name in $wanted) {
+        $match = @($EntryNames | Where-Object { $_ -ieq $name -or ($_ -replace '^.*/', '') -ieq ($name -replace '^.*[\\/]', '') }) | Select-Object -First 1
+        if ($match) { return $match }
+    }
+    throw "The application artifact has no license entry (looked for: $(($wanted | Select-Object -Unique) -join ', '))."
+}
+
+function Get-BcDevEnvCrc32 {
+    param([AllowEmptyCollection()] [byte[]] $Bytes = @())
+
+    if (-not (Get-Variable -Scope Script -Name 'Crc32Table' -ErrorAction SilentlyContinue)) {
+        $table = New-Object 'long[]' 256
+        for ($n = 0; $n -lt 256; $n++) {
+            [long] $c = $n
+            for ($k = 0; $k -lt 8; $k++) {
+                if ($c -band 1) { $c = 3988292384 -bxor ($c -shr 1) } else { $c = $c -shr 1 }
+            }
+            $table[$n] = $c
+        }
+        $script:Crc32Table = $table
+    }
+    [long] $crc = 4294967295
+    foreach ($b in $Bytes) { $crc = $script:Crc32Table[($crc -bxor $b) -band 255] -bxor ($crc -shr 8) }
+    return ($crc -bxor 4294967295)
+}
+
+<#
+.SYNOPSIS
+    Fetches a byte range of a remote file with an HTTP range request (From/To inclusive; From $null
+    means the last To bytes). Returns the bytes, their offset and the total length of the file.
+#>
+function Invoke-BcDevEnvHttpRangeRequest {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [AllowNull()] [Nullable[long]] $From,
+        [Parameter(Mandatory = $true)] [long] $To
+    )
+
+    if (-not (Get-Variable -Scope Script -Name 'RangeHttpClient' -ErrorAction SilentlyContinue)) {
+        $script:RangeHttpClient = [System.Net.Http.HttpClient]::new()
+        $script:RangeHttpClient.Timeout = [TimeSpan]::FromMinutes(5)
+    }
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Uri)
+    $request.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($From, $To)
+    try {
+        $response = $script:RangeHttpClient.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try {
+            if ([int]$response.StatusCode -ne 206 -or $null -eq $response.Content.Headers.ContentRange) {
+                throw [System.NotSupportedException]::new("The server did not answer the range request with a partial response (HTTP $([int]$response.StatusCode)).")
+            }
+            $range = $response.Content.Headers.ContentRange
+            $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            $expected = [long]$range.To - [long]$range.From + 1
+            if ($bytes.Length -ne $expected) { throw "The range response has $($bytes.Length) bytes; expected $expected." }
+            return [pscustomobject]@{ Bytes = $bytes; Offset = [long]$range.From; Length = [long]$range.Length }
+        }
+        finally { $response.Dispose() }
+    }
+    finally { $request.Dispose() }
+}
+
+<#
+.SYNOPSIS
+    Reads the central directory of a remote zip archive with HTTP range requests (no ZIP64 support:
+    such archives throw NotSupportedException so that the caller can download the whole file).
+#>
+function Get-BcDevEnvRemoteZipDirectory {
+    param([Parameter(Mandatory = $true)] [string] $Uri)
+
+    $tail = Invoke-BcDevEnvHttpRangeRequest -Uri $Uri -From $null -To 65557
+    $bytes = $tail.Bytes
+    $eocd = -1
+    for ($i = $bytes.Length - 22; $i -ge 0; $i--) {
+        if ($bytes[$i] -eq 0x50 -and $bytes[$i + 1] -eq 0x4B -and $bytes[$i + 2] -eq 0x05 -and $bytes[$i + 3] -eq 0x06) { $eocd = $i; break }
+    }
+    if ($eocd -lt 0) { throw [System.NotSupportedException]::new('The end of the zip central directory was not found.') }
+    $entryCount = [System.BitConverter]::ToUInt16($bytes, $eocd + 10)
+    $directorySize = [long][System.BitConverter]::ToUInt32($bytes, $eocd + 12)
+    $directoryOffset = [long][System.BitConverter]::ToUInt32($bytes, $eocd + 16)
+    if ($entryCount -eq 0xFFFF -or $directorySize -eq 4294967295 -or $directoryOffset -eq 4294967295) {
+        throw [System.NotSupportedException]::new('The zip archive uses ZIP64.')
+    }
+    if ($directoryOffset + $directorySize -gt $tail.Offset + $eocd) { throw 'The zip central directory lies beyond its end record.' }
+    if ($directoryOffset -ge $tail.Offset) {
+        $directory = [byte[]]::new($directorySize)
+        [System.Array]::Copy($bytes, $directoryOffset - $tail.Offset, $directory, 0, $directorySize)
+    }
+    else {
+        $directory = (Invoke-BcDevEnvHttpRangeRequest -Uri $Uri -From $directoryOffset -To ($directoryOffset + $directorySize - 1)).Bytes
+    }
+
+    $entries = @()
+    $position = 0
+    for ($n = 0; $n -lt $entryCount; $n++) {
+        if ($position + 46 -gt $directory.Length -or [System.BitConverter]::ToUInt32($directory, $position) -ne 0x02014B50) {
+            throw "Zip central directory entry $n is corrupt."
+        }
+        $flags = [System.BitConverter]::ToUInt16($directory, $position + 8)
+        $nameLength = [System.BitConverter]::ToUInt16($directory, $position + 28)
+        $extraLength = [System.BitConverter]::ToUInt16($directory, $position + 30)
+        $commentLength = [System.BitConverter]::ToUInt16($directory, $position + 32)
+        $encoding = if ($flags -band 0x800) { [System.Text.Encoding]::UTF8 } else { [System.Text.Encoding]::GetEncoding('ISO-8859-1') }
+        $entry = [pscustomobject]@{
+            Name              = $encoding.GetString($directory, $position + 46, $nameLength)
+            Method            = [int][System.BitConverter]::ToUInt16($directory, $position + 10)
+            Crc32             = [long][System.BitConverter]::ToUInt32($directory, $position + 16)
+            CompressedSize    = [long][System.BitConverter]::ToUInt32($directory, $position + 20)
+            Size              = [long][System.BitConverter]::ToUInt32($directory, $position + 24)
+            LocalHeaderOffset = [long][System.BitConverter]::ToUInt32($directory, $position + 42)
+        }
+        if ($entry.CompressedSize -eq 4294967295 -or $entry.Size -eq 4294967295 -or $entry.LocalHeaderOffset -eq 4294967295) {
+            throw [System.NotSupportedException]::new("Zip entry '$($entry.Name)' uses ZIP64.")
+        }
+        $entries += $entry
+        $position += 46 + $nameLength + $extraLength + $commentLength
+    }
+    return [pscustomobject]@{ Uri = $Uri; Length = $tail.Length; Entries = $entries }
+}
+
+<#
+.SYNOPSIS
+    Reads one entry of a remote zip archive (see Get-BcDevEnvRemoteZipDirectory) with HTTP range
+    requests, inflates it and checks its size and CRC-32.
+#>
+function Read-BcDevEnvRemoteZipEntry {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [Parameter(Mandatory = $true)] $Entry
+    )
+
+    $header = (Invoke-BcDevEnvHttpRangeRequest -Uri $Uri -From $Entry.LocalHeaderOffset -To ($Entry.LocalHeaderOffset + 29)).Bytes
+    if ([System.BitConverter]::ToUInt32($header, 0) -ne 0x04034B50) { throw "The local header of zip entry '$($Entry.Name)' is corrupt." }
+    $dataOffset = $Entry.LocalHeaderOffset + 30 + [System.BitConverter]::ToUInt16($header, 26) + [System.BitConverter]::ToUInt16($header, 28)
+    $data = if ($Entry.CompressedSize -gt 0) {
+        (Invoke-BcDevEnvHttpRangeRequest -Uri $Uri -From $dataOffset -To ($dataOffset + $Entry.CompressedSize - 1)).Bytes
+    }
+    else { [byte[]]@() }
+
+    switch ($Entry.Method) {
+        0 { $content = $data }
+        8 {
+            $compressed = New-Object System.IO.MemoryStream (, [byte[]]$data)
+            $deflate = New-Object System.IO.Compression.DeflateStream ($compressed, [System.IO.Compression.CompressionMode]::Decompress)
+            $output = New-Object System.IO.MemoryStream
+            try { $deflate.CopyTo($output); $content = $output.ToArray() }
+            finally { $deflate.Dispose(); $compressed.Dispose(); $output.Dispose() }
+        }
+        default { throw [System.NotSupportedException]::new("Zip entry '$($Entry.Name)' uses compression method $($Entry.Method).") }
+    }
+    if ($content.Length -ne $Entry.Size) { throw "Zip entry '$($Entry.Name)' inflated to $($content.Length) bytes; expected $($Entry.Size)." }
+    $crc = Get-BcDevEnvCrc32 -Bytes $content
+    if ($crc -ne $Entry.Crc32) { throw "Zip entry '$($Entry.Name)' failed its CRC-32 check." }
+    return , $content
+}
+
+<#
+.SYNOPSIS
+    Extracts the CRONUS license of an AL-Go application artifact to Destination and returns its path.
+.DESCRIPTION
+    An empty platform database holds no license, so without a license secret the pipeline uses the
+    license that AL-Go/BcContainerHelper use by default: the one shipped in the application artifact
+    (manifest.json licenseFile, normally Cronus.bclicense). Only the license entry is read, with HTTP
+    range requests (a few KB instead of the whole artifact); when that is not possible the whole
+    artifact is downloaded (with retries) and the entry extracted from it.
+#>
+function Get-BcDevEnvArtifactLicense {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ArtifactUrl,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+
+    $displayUrl = ([System.Uri]$ArtifactUrl).GetLeftPart([System.UriPartial]::Path)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $entryName = $null
+    [byte[]] $bytes = $null
+    try {
+        $remote = Invoke-BcDevEnvWithRetry -Description "Reading the license from '$displayUrl' (HTTP range requests)" -MaxAttempts 3 -InitialDelaySeconds 5 -ScriptBlock {
+            $directory = Get-BcDevEnvRemoteZipDirectory -Uri $ArtifactUrl
+            $names = @($directory.Entries | ForEach-Object { $_.Name })
+            $manifestEntry = @($directory.Entries | Where-Object { $_.Name -ieq 'manifest.json' }) | Select-Object -First 1
+            $manifestJson = if ($manifestEntry) { [System.Text.Encoding]::UTF8.GetString((Read-BcDevEnvRemoteZipEntry -Uri $ArtifactUrl -Entry $manifestEntry)) } else { '' }
+            $name = Select-BcDevEnvArtifactLicenseEntry -EntryNames $names -ManifestJson $manifestJson
+            $licenseEntry = @($directory.Entries | Where-Object { $_.Name -ceq $name }) | Select-Object -First 1
+            [pscustomobject]@{ Name = $name; Bytes = (Read-BcDevEnvRemoteZipEntry -Uri $ArtifactUrl -Entry $licenseEntry) }
+        }
+        $entryName = $remote.Name
+        $bytes = $remote.Bytes
+    }
+    catch {
+        if ($_.Exception.Message -like '*has no license entry*') { throw }
+        Write-Host "Reading the license with HTTP range requests failed ($($_.Exception.Message)); downloading the whole artifact."
+        $zipPath = Join-Path $Destination 'application-artifact.zip'
+        Save-BcDevEnvDownload -Uri $ArtifactUrl -OutFile $zipPath -ValidateZip -Description "Downloading the application artifact '$displayUrl'" | Out-Null
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+            try {
+                $manifestEntry = @($zip.Entries | Where-Object { $_.FullName -ieq 'manifest.json' }) | Select-Object -First 1
+                $manifestJson = ''
+                if ($manifestEntry) {
+                    $reader = New-Object System.IO.StreamReader ($manifestEntry.Open())
+                    try { $manifestJson = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                }
+                $entryName = Select-BcDevEnvArtifactLicenseEntry -EntryNames @($zip.Entries | ForEach-Object { $_.FullName }) -ManifestJson $manifestJson
+                $entry = @($zip.Entries | Where-Object { $_.FullName -ceq $entryName }) | Select-Object -First 1
+                $stream = $entry.Open()
+                $buffer = New-Object System.IO.MemoryStream
+                try { $stream.CopyTo($buffer); $bytes = $buffer.ToArray() } finally { $stream.Dispose(); $buffer.Dispose() }
+            }
+            finally { $zip.Dispose() }
+        }
+        finally { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+    }
+    if ($null -eq $bytes -or $bytes.Length -eq 0) { throw "The license '$entryName' in the application artifact '$displayUrl' is empty." }
+
+    $path = Join-Path $Destination ($entryName -replace '^.*[\\/]', '')
+    [System.IO.File]::WriteAllBytes($path, $bytes)
+    Write-Host "Extracted the CRONUS license '$entryName' ($($bytes.Length) bytes) of the application artifact '$displayUrl' to '$path'."
     return $path
 }
 
@@ -1036,19 +1446,107 @@ function Invoke-BcDevEnvNativeCommand {
 
 <#
 .SYNOPSIS
+    Probes the Docker engine with `docker info`. Returns OSType/ServerVersion when the engine answers,
+    otherwise OSType = $null and the probe's error output in Error.
+#>
+function Get-BcDevEnvDockerEngineState {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& docker info --format '{{.OSType}}|{{.ServerVersion}}' 2>&1 | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{ OSType = $null; ServerVersion = $null; Error = $_.Exception.Message }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    $answer = @($output | Where-Object { $_ -match '^(windows|linux)\|' }) | Select-Object -Last 1
+    if ($exitCode -eq 0 -and $answer) {
+        $parts = $answer.Split('|')
+        return [pscustomobject]@{ OSType = $parts[0]; ServerVersion = $parts[1]; Error = '' }
+    }
+    return [pscustomobject]@{ OSType = $null; ServerVersion = $null; Error = "docker info exited with code $exitCode`: $($output -join ' ')" }
+}
+
+<#
+.SYNOPSIS
+    Makes sure the Docker engine is running before the pipeline uses it: starts the Docker service when
+    it is stopped and waits until `docker info` answers, failing with a clear error after the timeout,
+    when the service or CLI is missing, or when the engine does not run the expected container OS.
+#>
+function Wait-BcDevEnvDockerEngine {
+    param(
+        [string] $ServiceName = 'docker',
+        [int] $TimeoutSeconds = 300,
+        [int] $PollSeconds = 5,
+        [string] $ExpectedOSType = 'windows'
+    )
+
+    if (-not (Get-Command -Name 'docker' -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw 'The docker CLI is not available on this runner; the bcdevenv pipeline needs Docker with Windows containers (a Windows Server 2022 runner).'
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastError = ''
+    $startAttempts = 0
+    while ($true) {
+        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -eq $service) {
+            throw "The Docker engine service '$ServiceName' is not installed on this runner; the bcdevenv pipeline needs Docker with Windows containers."
+        }
+        $status = [string]$service.Status
+        if ($status -eq 'Stopped') {
+            $startAttempts++
+            Write-Host "The Docker engine service '$ServiceName' is stopped; starting it (attempt $startAttempts)."
+            try {
+                Start-Service -Name $ServiceName -ErrorAction Stop
+            }
+            catch {
+                $lastError = "Start-Service '$ServiceName' failed: $($_.Exception.Message)"
+                Write-Host $lastError
+            }
+        }
+        elseif ($status -eq 'Running') {
+            $state = Get-BcDevEnvDockerEngineState
+            if ($state.OSType) {
+                if ($ExpectedOSType -and $state.OSType -ne $ExpectedOSType) {
+                    throw "The Docker engine runs $($state.OSType) containers; the bcdevenv pipeline needs $ExpectedOSType containers."
+                }
+                Write-Host "The Docker engine is ready ($($state.OSType) containers, server $($state.ServerVersion))."
+                return $state
+            }
+            $lastError = $state.Error
+        }
+        if ((Get-Date) -ge $deadline) {
+            throw "The Docker engine did not become ready within $TimeoutSeconds seconds (service '$ServiceName' status: $status, start attempts: $startAttempts). Last error: $lastError"
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+}
+
+<#
+.SYNOPSIS
     Makes a local SQL Server Express instance available for bcdevenv create-env on a CI runner and
     points BCDEVENV_HOME at a folder the SQL service account can back up to.
 #>
 function Initialize-BcDevEnvSqlServer {
     param(
         [string] $Instance = 'SQLEXPRESS',
-        [string] $DataHome = 'C:\bcdevenv-home'
+        [string] $DataHome = 'C:\bcdevenv-home',
+        [string] $InstallScript = ''
     )
 
     $serviceName = if ($Instance -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$Instance" }
     if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-        Write-Host "SQL Server service '$serviceName' not found; installing SQL Server Express (Chocolatey)."
-        Invoke-BcDevEnvNativeCommand -FilePath 'choco' -Arguments @('install', 'sql-server-express', '--no-progress', '-y') -Description 'choco install sql-server-express' | Out-Null
+        if (-not $InstallScript -or -not (Test-Path -LiteralPath $InstallScript -PathType Leaf)) {
+            throw "SQL Server service '$serviceName' not found and no SQL Server Express install script was given (or '$InstallScript' does not exist)."
+        }
+        Write-Host "SQL Server service '$serviceName' not found; installing SQL Server Express with '$InstallScript'."
+        & $InstallScript -InstanceName $Instance
+        if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+            throw "SQL Server Express setup finished but the service '$serviceName' does not exist."
+        }
     }
     Set-Service -Name $serviceName -StartupType Automatic
     Start-Service -Name $serviceName

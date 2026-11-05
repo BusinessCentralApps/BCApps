@@ -94,7 +94,7 @@ public static class ProvisionCommand
                 }
                 else
                 {
-                    Log.Warn("No license file in the build context; using the platform's built-in license.");
+                    Log.Warn("No license file in the build context; the database must already hold a license (an empty create-env database holds none).");
                 }
 
                 // Bring the freshly created platform database to the operational state before any
@@ -147,8 +147,9 @@ public static class ProvisionCommand
         if (errorMessage.IndexOf("licen", StringComparison.OrdinalIgnoreCase) < 0) return null;
         return licenseImported
             ? "The error is license related: the imported license does not permit this operation (check its object ranges and expiry)."
-            : "The error is license related and no license was imported, so the platform's built-in license was used. " +
-              "Provide a license file (build-image --license / BCDEVENV_LICENSE) that covers these apps.";
+            : "The error is license related and no license was imported, so only a license already stored in the database could be used " +
+              "(an empty create-env database holds none). Provide a license file (build-image --license / BCDEVENV_LICENSE) that covers " +
+              "these apps, e.g. the CRONUS license (Cronus.bclicense) of a Business Central application artifact.";
     }
 
     /// <summary>

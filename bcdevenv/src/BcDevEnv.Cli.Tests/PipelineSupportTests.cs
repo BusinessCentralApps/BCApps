@@ -108,7 +108,58 @@ public class PipelineSupportTests
     public void License_hint_distinguishes_missing_and_insufficient_licenses()
     {
         Assert.Null(ProvisionCommand.LicenseHint("Sync failed", licenseImported: false));
-        Assert.Contains("no license was imported", ProvisionCommand.LicenseHint("Your license does not grant access", false));
+        var missing = ProvisionCommand.LicenseHint("No license file has been uploaded to the server.", false);
+        Assert.Contains("no license was imported", missing);
+        Assert.Contains("Cronus.bclicense", missing);
+        Assert.DoesNotContain("built-in", missing);
         Assert.Contains("imported license", ProvisionCommand.LicenseHint("The license has expired", true));
+    }
+
+    [Fact]
+    public void Build_image_fails_fast_when_apps_would_be_baked_into_an_unlicensed_empty_database()
+    {
+        var ex = Assert.Throws<BcDevEnvException>(() => BuildImageCommand.CheckLicense(hasLicense: false, emptyDatabase: true, appCount: 3));
+        Assert.Contains("--license", ex.Message);
+        Assert.Contains("3 bake-time app(s)", ex.Message);
+
+        Assert.Null(BuildImageCommand.CheckLicense(hasLicense: true, emptyDatabase: true, appCount: 3));
+        Assert.Contains("apps cannot be published", BuildImageCommand.CheckLicense(false, emptyDatabase: true, appCount: 0));
+        // An explicit --bak may already hold a license (e.g. a demo database).
+        Assert.Contains("database backup", BuildImageCommand.CheckLicense(false, emptyDatabase: false, appCount: 3));
+    }
+
+    [Fact]
+    public void Container_files_are_staged_into_the_context_root()
+    {
+        using var tool = new TempDir();
+        using var context = new TempDir();
+        tool.Write(Path.Combine("container", "Dockerfile"), "FROM x");
+        tool.Write(Path.Combine("container", "Install-SqlExpress.ps1"), "# sql");
+
+        var dockerfile = BuildImageCommand.StageContainerFiles(tool.Path, context.Path);
+
+        Assert.Equal(Path.Combine(context.Path, "Dockerfile"), dockerfile);
+        Assert.Equal("# sql", File.ReadAllText(Path.Combine(context.Path, "Install-SqlExpress.ps1")));
+
+        File.Delete(Path.Combine(tool.Path, "container", "Install-SqlExpress.ps1"));
+        Assert.Throws<BcDevEnvException>(() => BuildImageCommand.StageContainerFiles(tool.Path, context.Path));
+    }
+
+    [Fact]
+    public void Dockerfile_installs_sql_with_the_staged_script_and_not_chocolatey()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "container", "Dockerfile"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var containerDir = Path.Combine(dir!.FullName, "container");
+        var dockerfile = File.ReadAllText(Path.Combine(containerDir, "Dockerfile"));
+
+        foreach (var leaf in BuildImageCommand.ContainerSetupFiles)
+        {
+            Assert.True(File.Exists(Path.Combine(containerDir, leaf)), $"{leaf} is missing from the container folder.");
+            Assert.Contains($"COPY {leaf} ", dockerfile);
+        }
+        Assert.Contains(@"C:\bcdevenv-setup\Install-SqlExpress.ps1", dockerfile);
+        Assert.DoesNotContain("choco ", dockerfile);
     }
 }

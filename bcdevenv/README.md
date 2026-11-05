@@ -5,7 +5,8 @@
 > `16e2402765a5a1bdebdab3c12fbaf462ea3739b8` (the `bcdevenv/` CLI folder; the AL test-runner
 > app that lived in that repository's `build/testrunner/` is now [`testrunner/`](testrunner/app.json)).
 > Changes made here: the per-codeunit test protocol and DisabledTests support in `run-tests`
-> and the runner app, `build-image` company/server-setting options, and an optional license.
+> and the runner app, `build-image` company/server-setting options and license checks, and the
+> SQL Server Express setup script (`container/Install-SqlExpress.ps1`, replacing Chocolatey).
 >
 > In this repository the CLI drives the CI build: the
 > [`RunBcDevEnvPipeline`](../.github/actions/RunBcDevEnvPipeline/action.yaml) action replaces
@@ -209,9 +210,16 @@ build mode it:
    dependency apps, the project's `.buildartifacts\Apps` and `.buildartifacts\TestApps`,
    and orders them by their `app.json` dependencies (apps excluded by the project's
    `PublishBcContainerApp.ps1` override are not installed);
-2. builds this CLI (`dotnet build`), prepares a local SQL Server Express, downloads
-   the **platform-only** artifact of the `BCPlatform` version in `build\Packages.json`
-   and compiles the test runner app with that platform's AL compiler;
+2. makes sure the Docker engine is running (starts the `docker` service when it is
+   stopped and waits up to 5 minutes for `docker info` to answer with Windows
+   containers, otherwise fails with a clear error; checked again right before the
+   image build), builds this CLI (`dotnet build`), prepares a local SQL Server
+   Express (`container\Install-SqlExpress.ps1`, also used by the image: Microsoft's
+   SHA256-checked download instead of the Chocolatey feed, setup retried and verified
+   by the instance service starting), downloads the **platform-only** artifact of the
+   `BCPlatform` version in `build\Packages.json` (with retries; a truncated or
+   invalid zip is deleted and downloaded again) and compiles the test runner app
+   with that platform's AL compiler;
 3. `create-env` creates an **empty** platform database (no Cronus/demo data),
    `build-image` provisions it with all the apps plus the test runner (and, for
    `IntegrationTest`/`Uncategorized` build modes, creates the company and runs the
@@ -234,12 +242,17 @@ missing report, and when test apps were selected but no test ran. It does not us
 BcContainerHelper; the surrounding AL-Go steps (`CompileApps`, `PipelineCleanup`, …)
 are unchanged and still do.
 
-**License.** The license is optional. The action reads the `licenseFileUrl` entry of
-the AL-Go secrets (map it to another secret with the AL-Go
-`licenseFileUrlSecretName` setting); the value may be an http(s) URL, a
-gzip+base64-encoded license (`H4sI…`) or a path. Without it, a warning is written
-and the platform's built-in license is used; licensing errors during provisioning
-are reported as such.
+**License.** An empty platform database holds no license, and Business Central does
+not publish apps without one. The action reads the `licenseFileUrl` entry of the
+AL-Go secrets (map it to another secret with the AL-Go `licenseFileUrlSecretName`
+setting); the value may be an http(s) URL, a gzip+base64-encoded license (`H4sI…`)
+or a path. Without it, a warning is written and — as AL-Go does without
+`licenseFileUrl` — the CRONUS license of the AL-Go application artifact is used
+(the artifact resolved from the `artifact` setting, e.g. `sandbox/<version>/base`;
+the entry named by its `manifest.json` `licenseFile`, normally `Cronus.bclicense`,
+read with HTTP range requests, falling back to downloading the whole artifact).
+Licensing errors during provisioning are reported as such. `build-image` itself
+refuses to bake apps into a `create-env` database without `--license`.
 
 **Not supported** (the step fails with an explicit message): projects without
 workspace compilation, `testType` `Legacy` (demo data generated through a page
@@ -265,7 +278,8 @@ and the installed app files.
 ## Hosting in a separate repository
 
 The folder is self-contained: copy it out, keep the same layout
-(`src\BcDevEnv.Cli`, `container\Dockerfile`, `bcdevenv.cmd`, the `Directory.*`
+(`src\BcDevEnv.Cli`, `container\Dockerfile` + `container\Install-SqlExpress.ps1`,
+`bcdevenv.cmd`, the `Directory.*`
 + `nuget.config` files), and it builds and runs unchanged. The only external
 input at runtime is the platform artifact (`--platform` / `BCDEVENV_PLATFORM`).
 `build-image` locates the tool root from the running executable, so it also
@@ -290,9 +304,9 @@ in-process with no errors and exposes the DB/server/app cmdlets, and the SQL
 client connects. A full image build/run must happen on a Windows-container host.
 Caveats:
 
-- The Dockerfile leaves the **SQL Express install step** as an explicit,
-  commented placeholder — wire it to your approved SQL Express package before
-  publishing images.
+- The image installs SQL Server Express with `container\Install-SqlExpress.ps1`
+  (Microsoft's `SQLEXPR_x64_ENU.exe`, pinned by SHA256); update its URL and hash
+  together when moving to another SQL Server Express release.
 - Registering an NST from baked binaries on a plain Windows base image may need
   manual service setup, since `New-NAVServerInstance` normally expects the
   product installed.

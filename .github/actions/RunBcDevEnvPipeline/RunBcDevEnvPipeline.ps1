@@ -130,7 +130,13 @@ Write-Host "Container: $($names.ContainerName); image: $($names.ImageTag); work 
 
 $licensePath = $null
 $succeeded = $false
+$dockerReady = $false
 try {
+    # --- Docker engine (checked first so that a runner without a running engine fails fast) --------
+    Write-Section 'Docker engine'
+    Wait-BcDevEnvDockerEngine -ServiceName 'docker' -TimeoutSeconds 300 | Out-Null
+    $dockerReady = $true
+
     # --- bcdevenv CLI ---------------------------------------------------------------------------
     Write-Section 'Build the bcdevenv CLI'
     $toolRoot = Join-Path $repoRoot 'bcdevenv'
@@ -145,15 +151,15 @@ try {
 
     # --- SQL Server -------------------------------------------------------------------------------
     Write-Section 'SQL Server'
-    Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome | Out-Null
+    Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome -InstallScript (Join-Path $toolRoot 'container/Install-SqlExpress.ps1') | Out-Null
 
     # --- Platform artifact ------------------------------------------------------------------------
     Write-Section 'Platform artifact (build/Packages.json BCPlatform)'
-    $platform = Get-BcDevEnvPlatformArtifact
+    $platform = Invoke-BcDevEnvWithRetry -Description 'Resolving the BCPlatform artifact' -MaxAttempts 3 -ScriptBlock { Get-BcDevEnvPlatformArtifact }
     Write-Host "BCPlatform $($platform.Version): $($platform.Url)"
     $platformZip = Join-Path $work 'platform.zip'
     $platformDir = Join-Path $work 'platform'
-    Invoke-WebRequest -Uri $platform.Url -OutFile $platformZip -UseBasicParsing -TimeoutSec 3600
+    Save-BcDevEnvDownload -Uri $platform.Url -OutFile $platformZip -ValidateZip -Description "Downloading the BCPlatform $($platform.Version) artifact" | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($platformZip, $platformDir)
     Remove-Item -LiteralPath $platformZip -Force
@@ -185,7 +191,13 @@ try {
     Write-Section 'License'
     $licensePath = Resolve-BcDevEnvLicense -SecretsJson "$env:Secrets" -SecretName $LicenseSecretName -Destination (Join-Path $work 'license')
     if (-not $licensePath) {
-        Write-Host "::warning::No license secret '$LicenseSecretName' is available; the apps are installed and tested with the platform's built-in license."
+        # An empty platform database holds no license and Business Central does not publish apps
+        # without one, so fall back to what AL-Go uses without licenseFileUrl: the CRONUS license
+        # of the AL-Go application artifact (resolved by DetermineArtifactUrl into $env:artifact).
+        $artifactUrl = Get-BcDevEnvApplicationArtifactUrl -ResolvedArtifactUrl "$env:artifact" -Settings $settings
+        $artifactDisplayUrl = ([System.Uri]$artifactUrl).GetLeftPart([System.UriPartial]::Path)
+        $licensePath = Get-BcDevEnvArtifactLicense -ArtifactUrl $artifactUrl -Destination (Join-Path $work 'license')
+        Write-Host "::warning::No license secret '$LicenseSecretName' is available; the apps are installed and tested with the CRONUS license of the AL-Go application artifact ($artifactDisplayUrl). Licensing errors are reported as such; provide a license through the '$LicenseSecretName' secret if the apps need more."
     }
 
     # --- Empty database, image, container -------------------------------------------------------------
@@ -202,6 +214,8 @@ try {
     foreach ($codeunit in @($plan.CompanyCodeunits)) { $buildArguments += @('--company-codeunit', $codeunit) }
     foreach ($setting in @($plan.ServerSettings)) { $buildArguments += @('--server-setting', $setting) }
     if ($licensePath) { $buildArguments += @('--license', $licensePath) }
+    # The Docker engine was seen to stop mid-job on hosted runners; re-check it before the long build.
+    Wait-BcDevEnvDockerEngine -ServiceName 'docker' -TimeoutSeconds 300 | Out-Null
     Invoke-BcDevEnvNativeCommand -FilePath $bcdevenv -Arguments $buildArguments -Description 'bcdevenv build-image (provisioning the empty database with the apps)' | Out-Null
 
     Write-Section 'Start the container'
@@ -282,7 +296,10 @@ try {
 finally {
     Write-Host "::endgroup::"
     Write-Host "::group::Cleanup"
-    if (Test-ContainerExists $names.ContainerName) {
+    if (-not $dockerReady) {
+        Write-Host 'The Docker engine was not ready; no container or image was created.'
+    }
+    elseif (Test-ContainerExists $names.ContainerName) {
         if (-not $succeeded) {
             Write-Host 'Exporting the container event log.'
             $exported = Invoke-Docker -Arguments @('exec', '-u', 'ContainerAdministrator', $names.ContainerName, 'wevtutil', 'epl', 'Application', 'C:\ContainerEventLog.evtx', '/ow:true') -AllowFailure -Description 'Exporting the event log'
@@ -292,7 +309,9 @@ finally {
         }
         Invoke-Docker -Arguments @('rm', '-f', $names.ContainerName) -AllowFailure | Out-Null
     }
-    Invoke-Docker -Arguments @('image', 'rm', '-f', $names.ImageTag) -AllowFailure -Description 'docker image rm' | Out-Null
+    if ($dockerReady) {
+        Invoke-Docker -Arguments @('image', 'rm', '-f', $names.ImageTag) -AllowFailure -Description 'docker image rm' | Out-Null
+    }
     if ($licensePath -and (Test-Path -LiteralPath $licensePath)) { Remove-Item -LiteralPath $licensePath -Force -ErrorAction SilentlyContinue }
     foreach ($folder in @($work, $dataHome)) {
         if (Test-Path -LiteralPath $folder) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }

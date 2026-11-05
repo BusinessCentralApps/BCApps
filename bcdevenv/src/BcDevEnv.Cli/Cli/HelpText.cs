@@ -144,8 +144,10 @@ build-image - Stage the .bak + platform Service/WebClient binaries (from the
   --tag <tag>               Image tag (default: bcdevenv:<version>-<country>)
   --base-image <ref>        Base image (default: mcr.microsoft.com/windows/servercore:ltsc2022)
   --credential-type <t>     Windows | NavUserPassword (default: Windows)
-  --license <path>          License file to bake (or BCDEVENV_LICENSE); optional - without
-                            it the platform's built-in license is used
+  --license <path>          License file to bake (or BCDEVENV_LICENSE). Required to bake
+                            apps into the empty create-env database, which holds no
+                            license - e.g. the CRONUS license (Cronus.bclicense) of a
+                            Business Central application artifact
   --registry <host>         Registry to prefix the tag with
   --push                    Push the image after building (never push an image that
                             contains a private license)

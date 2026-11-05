@@ -46,8 +46,9 @@ inputs:
     description: >-
       Key in the ReadSecrets output ($env:Secrets) that holds the license: an http(s) URL, a gzip+base64
       encoded license or a path. AL-Go's licenseFileUrlSecretName setting maps licenseFileUrl to the
-      repository/organization secret actually used. When the secret is not available, no license is
-      imported and the platform's built-in license is used.
+      repository/organization secret actually used. When the secret is not available, the CRONUS license
+      of the AL-Go application artifact (the one AL-Go resolves from the 'artifact' setting) is used, as
+      AL-Go does without licenseFileUrl; an empty platform database holds no license of its own.
     required: false
     default: licenseFileUrl
 runs:
