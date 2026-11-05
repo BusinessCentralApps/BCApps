@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BcDevEnv.Cli.Tests/BcDevEnv.Cli.Tests.csproj" />
+    <Project Path="src/BcDevEnv.Cli.IntegrationTests/BcDevEnv.Cli.IntegrationTests.csproj" />
+    <Project Path="src/BcDevEnv.Cli/BcDevEnv.Cli.csproj" />
+  </Folder>
+</Solution>

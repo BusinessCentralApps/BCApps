@@ -1,0 +1,19 @@
+<Project>
+  <!--
+    Standalone .NET 10 tool: intentionally ISOLATED from the enlistment's
+    CoreXT / central-package-management build machinery.
+
+    MSBuild imports only the *nearest* Directory.Build.props walking up from a
+    project, so this file halts inheritance of the repo-root Directory.Build.props
+    (which defaults projects to .NET Framework v4.8, imports CoreXT build.props,
+    and turns on central package management). bcdevenv is a modern net10.0 exe that
+    depends on public NuGet packages (Microsoft.PowerShell.SDK), so it opts out of
+    all of that and manages its own versions inline on PackageReference.
+
+    This does not affect any other project in the repo.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+</Project>

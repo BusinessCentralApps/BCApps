@@ -212,7 +212,7 @@ jobs:
           Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "NeedsContext=$needsContextPath"
 
       - name: Build
-        uses: microsoft/AL-Go/Actions/RunPipeline@fb27afbcab20378ab0ac0978e7efe4131bdc0962
+        uses: ./.github/actions/RunBcDevEnvPipeline
         if: steps.DetermineBuildProject.outputs.BuildIt == 'True'
         env:
           Secrets: '${{ steps.ReadSecrets.outputs.Secrets }}'
@@ -228,6 +228,7 @@ jobs:
           baselineWorkflowRunId: ${{ inputs.baselineWorkflowRunId }}
           baselineWorkflowSHA: ${{ inputs.baselineWorkflowSHA }}
           previousAppsPath: ${{ steps.DownloadPreviousRelease.outputs.PreviousAppsPath }}
+          licenseSecretName: licenseFileUrl
 
       - name: Sign
         id: sign

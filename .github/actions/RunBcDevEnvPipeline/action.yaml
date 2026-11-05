@@ -1,0 +1,110 @@
+name: Run bcdevenv pipeline
+author: BusinessCentralApps
+description: >-
+  Replaces microsoft/AL-Go/Actions/RunPipeline for workspace-compiled AL-Go projects. Builds the
+  bcdevenv CLI, creates an empty-database Business Central container from the BCPlatform version in
+  build/Packages.json, installs the project's apps and test apps (compiled by CompileApps) with their
+  dependencies, and runs the tests while honoring the DisabledTests folders (src/DisabledTests).
+inputs:
+  shell:
+    description: Accepted for compatibility with RunPipeline. The pipeline always runs in pwsh.
+    required: false
+    default: powershell
+  artifact:
+    description: Accepted for compatibility with RunPipeline and ignored. The platform version comes from build/Packages.json (BCPlatform).
+    required: false
+    default: ''
+  project:
+    description: AL-Go project to build
+    required: false
+    default: '.'
+  buildMode:
+    description: AL-Go build mode
+    required: false
+    default: Default
+  installAppsJson:
+    description: Dependency apps to install (DownloadProjectDependencies output DownloadedApps)
+    required: false
+    default: ''
+  installTestAppsJson:
+    description: Dependency test apps to install (DownloadProjectDependencies output DownloadedTestApps)
+    required: false
+    default: ''
+  baselineWorkflowRunId:
+    description: Accepted for compatibility with RunPipeline and ignored (all project apps are installed and tested).
+    required: false
+    default: '0'
+  baselineWorkflowSHA:
+    description: Accepted for compatibility with RunPipeline and ignored.
+    required: false
+    default: ''
+  previousAppsPath:
+    description: Previous release apps (DownloadPreviousRelease output). Upgrade testing is not performed; the apps are installed into an empty database.
+    required: false
+    default: ''
+  licenseSecretName:
+    description: >-
+      Key in the ReadSecrets output ($env:Secrets) that holds the license: an http(s) URL, a gzip+base64
+      encoded license or a path. AL-Go's licenseFileUrlSecretName setting maps licenseFileUrl to the
+      repository/organization secret actually used. When the secret is not available, no license is
+      imported and the platform's built-in license is used.
+    required: false
+    default: licenseFileUrl
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Run pipeline
+      shell: pwsh
+      env:
+        _project: ${{ inputs.project }}
+        _buildMode: ${{ inputs.buildMode }}
+        _installAppsJson: ${{ inputs.installAppsJson }}
+        _installTestAppsJson: ${{ inputs.installTestAppsJson }}
+        _previousAppsPath: ${{ inputs.previousAppsPath }}
+        _licenseSecretName: ${{ inputs.licenseSecretName }}
+        DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        DOTNET_NOLOGO: '1'
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $project = if ([string]::IsNullOrWhiteSpace($env:_project)) { '.' } else { $env:_project }
+        $projectPath = if ($project -eq '.') { $env:GITHUB_WORKSPACE } else { Join-Path $env:GITHUB_WORKSPACE $project }
+        $buildOutput = Join-Path $projectPath 'BuildOutput.txt'
+        $parameters = @{
+          Project             = $project
+          BuildMode           = $env:_buildMode
+          InstallAppsJson     = $env:_installAppsJson
+          InstallTestAppsJson = $env:_installTestAppsJson
+          LicenseSecretName   = $env:_licenseSecretName
+          PreviousAppsPath    = $env:_previousAppsPath
+        }
+        try {
+          & (Join-Path $env:GITHUB_ACTION_PATH 'RunBcDevEnvPipeline.ps1') @parameters *>&1 | Tee-Object -FilePath $buildOutput -Append
+        }
+        catch {
+          $message = $_.Exception.Message
+          Add-Content -LiteralPath $buildOutput -Value "ERROR: $message" -Encoding UTF8
+          foreach ($line in ($message -split "`r?`n")) { if ($line.Trim()) { Write-Host "::error::$line" } }
+          Write-Host $_.ScriptStackTrace
+          exit 1
+        }
+
+    - name: Cleanup
+      if: always()
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        if ($env:BCDEVENV_PIPELINE_CONTAINER) { docker rm -f $env:BCDEVENV_PIPELINE_CONTAINER *> $null }
+        if ($env:BCDEVENV_PIPELINE_IMAGE) { docker image rm -f $env:BCDEVENV_PIPELINE_IMAGE *> $null }
+        foreach ($folder in @($env:BCDEVENV_PIPELINE_WORK, $env:BCDEVENV_PIPELINE_HOME)) {
+          if ($folder -and (Test-Path -LiteralPath $folder)) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        exit 0
+
+branding:
+  icon: terminal
+  color: blue

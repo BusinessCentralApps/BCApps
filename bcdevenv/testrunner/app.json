@@ -1,0 +1,38 @@
+{
+  "id": "b7f1d6c2-6a1e-4d3a-9d7c-9a2b5e4f0c11",
+  "name": "BcDevEnv Test Runner",
+  "publisher": "BcDevEnv",
+  "brief": "OData test-runner endpoint for bcdevenv run-tests.",
+  "description": "Exposes a 'BcDevEnvTestRunner' web service for 'bcdevenv run-tests'. RunAll runs the installed test codeunits via the Microsoft test framework toolkit; the per-codeunit protocol (PrepareTests, RunCodeunit, GetCodeunitResults) prepares a suite for one extension/test type/isolation, excludes the DisabledTests entries before execution and runs one codeunit per call. Results are returned as xUnit XML, which 'bcdevenv run-tests' converts to JUnit.",
+  "version": "30.0.0.0",
+  "dependencies": [
+    {
+      "id": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+      "name": "System Application",
+      "publisher": "Microsoft",
+      "version": "30.0.0.0"
+    },
+    {
+      "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
+      "name": "Test Runner",
+      "publisher": "Microsoft",
+      "version": "30.0.0.0"
+    }
+  ],
+  "platform": "30.0.0.0",
+  "target": "OnPrem",
+  "idRanges": [
+    {
+      "from": 50100,
+      "to": 50149
+    }
+  ],
+  "features": [
+    "NoImplicitWith"
+  ],
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": true,
+    "includeSourceInSymbolFile": true
+  }
+}
