@@ -240,7 +240,10 @@ build mode it:
 The step fails on any failing test, on runner/DisabledTests violations, on a
 missing report, and when test apps were selected but no test ran. It does not use
 BcContainerHelper; the surrounding AL-Go steps (`CompileApps`, `PipelineCleanup`, …)
-are unchanged and still do.
+are unchanged and still do, except that `PipelineCleanup` is `continue-on-error`:
+hosted runners are sometimes started without a running Docker engine, and its
+failure would otherwise fail a compile-only job (and, through `Build1`, skip every
+test job).
 
 **License.** An empty platform database holds no license, and Business Central does
 not publish apps without one. The action reads the `licenseFileUrl` entry of the

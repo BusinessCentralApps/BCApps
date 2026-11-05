@@ -382,6 +382,9 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.DetermineBuildProject.outputs.BuildIt == 'True'
+        # Best effort: the bcdevenv action removes its own container and image, and hosted runners are
+        # sometimes started without a running Docker engine, where PipelineCleanup would fail the job.
+        continue-on-error: true
         uses: microsoft/AL-Go/Actions/PipelineCleanup@fb27afbcab20378ab0ac0978e7efe4131bdc0962
         with:
           shell: ${{ inputs.shell }}
