@@ -215,7 +215,8 @@ build mode it:
    containers, otherwise fails with a clear error; checked again right before the
    image build), builds this CLI (`dotnet build`), prepares a local SQL Server
    Express (`container\Install-SqlExpress.ps1`, also used by the image: Microsoft's
-   SHA256-checked download instead of the Chocolatey feed, setup retried and verified
+   SHA256-checked Express with Advanced Services download (engine + Full-Text Search)
+   instead of the Chocolatey feed, setup retried and verified
    by the instance service starting), downloads the **platform-only** artifact of the
    `BCPlatform` version in `build\Packages.json` (with retries; a truncated or
    invalid zip is deleted and downloaded again) and compiles the test runner app
@@ -308,8 +309,10 @@ client connects. A full image build/run must happen on a Windows-container host.
 Caveats:
 
 - The image installs SQL Server Express with `container\Install-SqlExpress.ps1`
-  (Microsoft's `SQLEXPR_x64_ENU.exe`, pinned by SHA256); update its URL and hash
-  together when moving to another SQL Server Express release.
+  (Microsoft's `SQLEXPRADV_x64_ENU.exe`, Express with Advanced Services, pinned by
+  SHA256, features `SQLENGINE,FULLTEXT`: BC creates full-text indexes when a company
+  is created); update its URL and hash together when moving to another SQL Server
+  Express release.
 - Registering an NST from baked binaries on a plain Windows base image may need
   manual service setup, since `New-NAVServerInstance` normally expects the
   product installed.

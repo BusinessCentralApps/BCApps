@@ -58,6 +58,11 @@ public static class ServeCommand
         Log.Info($"Starting SQL service '{serviceName}'...");
         // 'sc start' returns immediately; a non-zero code when already running is fine.
         ProcessRunner.Run("sc", new[] { "start", serviceName });
+        // Full-Text Search (BC's text-optimized indexes); absent on engine-only instances, which is fine.
+        var fullTextServiceName = sqlInstance.Equals("MSSQLSERVER", StringComparison.OrdinalIgnoreCase)
+            ? "MSSQLFDLauncher"
+            : $"MSSQLFDLauncher${sqlInstance}";
+        ProcessRunner.Run("sc", new[] { "start", fullTextServiceName });
         Thread.Sleep(TimeSpan.FromSeconds(5));
     }
 

@@ -834,7 +834,7 @@ Describe "Install-SqlExpress.ps1" {
         Mock Start-Process {
             $arguments = @($ArgumentList) -join ' '
             $sql.Processes.Add("$([System.IO.Path]::GetFileName($FilePath)) $arguments")
-            if ($FilePath -like '*SQLEXPR_x64_ENU.exe') {
+            if ($FilePath -like '*SQLEXPRADV_x64_ENU.exe') {
                 $media = ($arguments -replace '^.*/x:"([^"]+)".*$', '$1')
                 New-Item -ItemType Directory -Path $media -Force | Out-Null
                 Set-Content -LiteralPath (Join-Path $media 'setup.exe') -Value 'setup'
@@ -849,14 +849,24 @@ Describe "Install-SqlExpress.ps1" {
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         $sql.Processes.Count | Should -Be 0
+        Should -Invoke Set-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'MSSQLFDLauncher$SQLEXPRESS' -and $StartupType -eq 'Automatic' }
     }
 
-    It "downloads, extracts and installs, judging success by the service and not by the exit code" {
+    It "warns when a running instance has no Full-Text Search service" {
+        $sql.SetupRuns = 1
+        Mock Get-Service { } -ParameterFilter { $Name -like 'MSSQLFDLauncher*' }
+        $output = & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>&1 | Out-String
+        $output | Should -BeLike "*Full-Text Search service 'MSSQLFDLauncher`$SQLEXPRESS' not found*"
+        Should -Invoke Set-Service -Times 0 -Exactly
+    }
+
+    It "downloads, extracts and installs engine and Full-Text Search, judging success by the service and not by the exit code" {
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
-        $sql.Processes[0] | Should -BeLike 'SQLEXPR_x64_ENU.exe /Q /x:*'
-        $sql.Processes[1] | Should -BeLike 'setup.exe /IACCEPTSQLSERVERLICENSETERMS /Q /ACTION=Install /FEATURES=SQLENGINE /INSTANCEID=SQLEXPRESS /INSTANCENAME=SQLEXPRESS*'
+        $sql.Processes[0] | Should -BeLike 'SQLEXPRADV_x64_ENU.exe /Q /x:*'
+        $sql.Processes[1] | Should -BeLike 'setup.exe /IACCEPTSQLSERVERLICENSETERMS /Q /ACTION=Install /FEATURES=SQLENGINE,FULLTEXT /INSTANCEID=SQLEXPRESS /INSTANCENAME=SQLEXPRESS*'
         $sql.Processes.Count | Should -Be 2
         Test-Path -LiteralPath $workFolder | Should -BeFalse
+        Should -Invoke Set-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'MSSQLFDLauncher$SQLEXPRESS' -and $StartupType -eq 'Automatic' }
     }
 
     It "uninstalls a half-installed instance before retrying setup" {
@@ -864,7 +874,7 @@ Describe "Install-SqlExpress.ps1" {
         $sql.RegisteredAfterFailure = $true
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
         $sql.SetupRuns | Should -Be 2
-        $sql.Processes[2] | Should -Be 'setup.exe /Q /ACTION=Uninstall /FEATURES=SQLENGINE /INSTANCENAME=SQLEXPRESS'
+        $sql.Processes[2] | Should -Be 'setup.exe /Q /ACTION=Uninstall /FEATURES=SQLENGINE,FULLTEXT /INSTANCENAME=SQLEXPRESS'
         $sql.Processes[3] | Should -BeLike 'setup.exe /IACCEPTSQLSERVERLICENSETERMS * /ACTION=Install *'
     }
 

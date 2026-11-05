@@ -35,7 +35,8 @@ ENV BCDEVENV_MGMT_DIR=C:\\bc\\Service\\Admin
 ENV BCDEVENV_INSTANCE=BC
 
 # ---------------------------------------------------------------------------
-# 1. SQL Server Express (engine only), installed by Install-SqlExpress.ps1 from
+# 1. SQL Server Express (engine + Full-Text Search, which BC's text-optimized
+#    indexes need when a company is created), installed by Install-SqlExpress.ps1 from
 #    Microsoft's download: SHA256-checked and retried, success judged by the
 #    instance service starting (not by exit codes), a failed setup diagnosed,
 #    cleaned up and retried. The same script installs SQL on the CI runner. It
@@ -74,10 +75,10 @@ RUN if (Test-Path C:\bcdevenv\binaries\Service)   { robocopy C:\bcdevenv\binarie
 RUN if (Test-Path C:\bcdevenv\binaries\WebClient) { robocopy C:\bcdevenv\binaries\WebClient C:\bc\WebClient /E /NFL /NDL /NJH /NJS | Out-Null; if ($LASTEXITCODE -ge 8) { exit 1 } }; exit 0
 
 # ---------------------------------------------------------------------------
-# 3. Provision: start SQL + SQL Browser, then restore the DB, register +
+# 3. Provision: start SQL (+ Full-Text Search) + SQL Browser, then restore the DB, register +
 #    configure the NST from the baked binaries, and install any bake-time apps.
 # ---------------------------------------------------------------------------
-RUN Start-Service 'MSSQL$SQLEXPRESS'; if (Get-Service SQLBrowser -ErrorAction SilentlyContinue) { Set-Service SQLBrowser -StartupType Automatic; Start-Service SQLBrowser }; Write-Host \"MGMT=$env:BCDEVENV_MGMT_DIR\"; Get-ChildItem C:\bc\Service\Admin -Filter *.psd1 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; & C:\bcdevenv\cli\bcdevenv.exe provision --context C:\bcdevenv; if ($LASTEXITCODE -ne 0) { throw 'provision failed' }
+RUN Start-Service 'MSSQL$SQLEXPRESS'; if (Get-Service 'MSSQLFDLauncher$SQLEXPRESS' -ErrorAction SilentlyContinue) { Start-Service 'MSSQLFDLauncher$SQLEXPRESS' }; if (Get-Service SQLBrowser -ErrorAction SilentlyContinue) { Set-Service SQLBrowser -StartupType Automatic; Start-Service SQLBrowser }; Write-Host \"MGMT=$env:BCDEVENV_MGMT_DIR\"; Get-ChildItem C:\bc\Service\Admin -Filter *.psd1 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; & C:\bcdevenv\cli\bcdevenv.exe provision --context C:\bcdevenv; if ($LASTEXITCODE -ne 0) { throw 'provision failed' }
 
 # ---------------------------------------------------------------------------
 # 4. Runtime.
