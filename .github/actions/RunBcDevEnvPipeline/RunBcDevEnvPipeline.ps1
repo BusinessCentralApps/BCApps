@@ -143,7 +143,11 @@ try {
     $env:BCDEVENV_TOOL_ROOT = $toolRoot
     Remove-Item Env:\BCDEVENV_LICENSE -ErrorAction SilentlyContinue
     $cliProject = Join-Path $toolRoot 'src/BcDevEnv.Cli/BcDevEnv.Cli.csproj'
-    Invoke-BcDevEnvNativeCommand -FilePath 'dotnet' -Arguments @('build', $cliProject, '-c', 'Release', '--nologo', '-v', 'q') -Description 'dotnet build bcdevenv' | Out-Null
+    # nuget.org occasionally resets connections on hosted runners, so the restore is retried on its own.
+    Invoke-BcDevEnvWithRetry -Description 'dotnet restore bcdevenv' -MaxAttempts 4 -ScriptBlock {
+        Invoke-BcDevEnvNativeCommand -FilePath 'dotnet' -Arguments @('restore', $cliProject, '--nologo', '-v', 'q') -Description 'dotnet restore bcdevenv' | Out-Null
+    } | Out-Null
+    Invoke-BcDevEnvNativeCommand -FilePath 'dotnet' -Arguments @('build', $cliProject, '-c', 'Release', '--no-restore', '--nologo', '-v', 'q') -Description 'dotnet build bcdevenv' | Out-Null
     $bcdevenv = Get-ChildItem -LiteralPath (Join-Path $toolRoot 'src/BcDevEnv.Cli/bin/Release') -Recurse -File -Filter 'bcdevenv.exe' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $bcdevenv) { throw 'The bcdevenv CLI build did not produce bcdevenv.exe.' }
     $bcdevenv = $bcdevenv.FullName
