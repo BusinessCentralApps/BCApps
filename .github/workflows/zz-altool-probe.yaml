@@ -30,7 +30,7 @@ jobs:
           foreach ($kind in 'Apps', 'TestApps') {
             gh run download 42101212021 --repo $env:GITHUB_REPOSITORY --name "build_projects_System Application Modules-mazhelez_bcdevenv-cli-pipeline-$kind-30.0.60005.0" --dir "probe/.buildartifacts/$kind"
             if ($LASTEXITCODE -ne 0) { throw "Downloading $kind failed" }
-            Write-Host "$kind: $((Get-ChildItem "probe/.buildartifacts/$kind" -Filter *.app).Count) apps"
+            Write-Host "${kind}: $((Get-ChildItem "probe/.buildartifacts/$kind" -Filter *.app).Count) apps"
           }
 
       - name: Probe
