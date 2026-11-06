@@ -1,0 +1,49 @@
+name: zz AL tool runtests probe (temporary)
+
+on:
+  push:
+    branches: [ 'mazhelez/altool-probe' ]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download System Application Modules apps (run 42101212021)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($kind in 'Apps', 'TestApps') {
+            gh run download 42101212021 --repo $env:GITHUB_REPOSITORY --name "build_projects_System Application Modules-mazhelez_bcdevenv-cli-pipeline-$kind-30.0.60005.0" --dir "probe/.buildartifacts/$kind"
+            if ($LASTEXITCODE -ne 0) { throw "Downloading $kind failed" }
+            Write-Host "$kind: $((Get-ChildItem "probe/.buildartifacts/$kind" -Filter *.app).Count) apps"
+          }
+
+      - name: Probe
+        shell: pwsh
+        env:
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+          DOTNET_NOLOGO: '1'
+        run: ./build/scripts/AlToolProbe.ps1
+
+      - name: Upload probe results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: altool-probe-results
+          path: probe-results/
+          if-no-files-found: warn
