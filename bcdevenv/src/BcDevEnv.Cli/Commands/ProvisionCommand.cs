@@ -168,8 +168,38 @@ public static class ProvisionCommand
             throw new BcDevEnvException("Cannot create the SUPER user for the test run: the current Windows account name is empty.");
         server.CreateSuperUser(instance, account);
 
+        var serviceAccount = ServerServiceAccountUser(manifest.CredentialType, account);
+        if (serviceAccount is not null)
+        {
+            try
+            {
+                server.CreateSuperUser(instance, serviceAccount);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"Could not create the SUPER user for the server account '{serviceAccount}': {ex.Message} " +
+                         "Tests whose AL code calls the server's own web services with default network credentials will fail with 401.");
+            }
+        }
+
         foreach (var call in manifest.CompanyCodeunits)
             server.InvokeCodeunit(instance, companyName, call.CodeunitId, call.MethodName);
+    }
+
+    /// <summary>Windows account the server instance runs as (see <see cref="NavServerService"/>).</summary>
+    public const string ServerServiceAccount = "NT AUTHORITY\\NETWORK SERVICE";
+
+    /// <summary>
+    /// The server account to map to a SUPER user in addition to the test-run account, or null.
+    /// With Windows authentication, AL code that calls the server's own endpoints with default
+    /// network credentials (e.g. the API test library's HttpClient.UseDefaultNetworkWindowsAuthentication)
+    /// authenticates as the account the server runs as, which must therefore be a user.
+    /// </summary>
+    public static string? ServerServiceAccountUser(string credentialType, string testRunAccount)
+    {
+        if (!string.Equals(credentialType, "Windows", StringComparison.OrdinalIgnoreCase)) return null;
+        if (string.Equals(testRunAccount, ServerServiceAccount, StringComparison.OrdinalIgnoreCase)) return null;
+        return ServerServiceAccount;
     }
 
     /// <summary>Best-effort dump of why the NST failed to start/serve during the build.</summary>

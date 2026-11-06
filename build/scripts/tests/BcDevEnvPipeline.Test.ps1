@@ -84,12 +84,12 @@ Describe "Get-BcDevEnvPipelinePlan" {
         { Get-BcDevEnvPipelinePlan -Settings (New-TestSettings @{ testType = 'UnitTest'; projectName = 'Test Apps (RU)' }) } | Should -Throw '*RU projects*'
     }
 
-    It "plans UnitTest runs in an empty company with an isolated and an isolation-disabled pass" {
+    It "plans UnitTest runs in an initialized company without demo data, with an isolated and an isolation-disabled pass" {
         $plan = Get-BcDevEnvPipelinePlan -Settings (New-TestSettings @{ testType = 'UnitTest'; companyName = 'Empty Company'; country = 'w1' })
         $plan.Action | Should -Be 'Test'
         $plan.CompanyName | Should -Be 'Empty Company'
         $plan.EvaluationCompany | Should -BeFalse
-        @($plan.CompanyCodeunits).Count | Should -Be 0
+        $plan.CompanyCodeunits | Should -Be @('2')
         @($plan.Passes).Count | Should -Be 2
         $plan.Passes[0].Isolation | Should -Be 'None'
         $plan.Passes[0].RunnerId | Should -Be 130450
@@ -117,6 +117,7 @@ Describe "Get-BcDevEnvPipelinePlan" {
     It "runs a single untyped pass when no test type is configured and maps base to w1" {
         $plan = Get-BcDevEnvPipelinePlan -Settings (New-TestSettings @{ country = 'base' })
         $plan.Country | Should -Be 'w1'
+        $plan.CompanyCodeunits | Should -Be @('2')
         @($plan.Passes).Count | Should -Be 1
         $plan.Passes[0].TestType | Should -Be ''
         $plan.Passes[0].Isolation | Should -Be ''

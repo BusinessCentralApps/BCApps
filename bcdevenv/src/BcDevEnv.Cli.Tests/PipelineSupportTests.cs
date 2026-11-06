@@ -115,6 +115,16 @@ public class PipelineSupportTests
         Assert.Contains("imported license", ProvisionCommand.LicenseHint("The license has expired", true));
     }
 
+    [Theory]
+    [InlineData("Windows", "ContainerAdministrator", "NT AUTHORITY\\NETWORK SERVICE")]
+    [InlineData("windows", "ContainerUser", "NT AUTHORITY\\NETWORK SERVICE")]
+    [InlineData("Windows", "NT AUTHORITY\\NETWORK SERVICE", null)]
+    [InlineData("NavUserPassword", "ContainerAdministrator", null)]
+    public void Server_account_is_mapped_to_a_user_only_with_windows_authentication(string credentialType, string account, string? expected)
+    {
+        Assert.Equal(expected, ProvisionCommand.ServerServiceAccountUser(credentialType, account));
+    }
+
     [Fact]
     public void Build_image_fails_fast_when_apps_would_be_baked_into_an_unlicensed_empty_database()
     {

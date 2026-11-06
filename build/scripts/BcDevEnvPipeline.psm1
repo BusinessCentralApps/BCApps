@@ -107,7 +107,9 @@ function Test-BcDevEnvIsRUProject {
                                                            apps are installed, no tests are run).
 
     Company data per test type (from build/scripts/ImportTestDataInBcContainer.ps1):
-      UnitTest / none : empty company.
+      UnitTest / none : empty company, Company-Initialize (2). Upstream's tests log in through a client
+                        session, whose OnAfterLogin subscriber runs Company-Initialize; the OData runner
+                        session has no GUI, so that subscriber exits and the pipeline runs it instead.
       IntegrationTest : Company-Initialize (2), Contoso CreateSetupDemoData (5193), 5691.
       Uncategorized   : evaluation company, Company-Initialize (2), Contoso CreateAllDemoData (5193),
                         DeleteWarehouseEmployee (5140), 5691.
@@ -172,6 +174,9 @@ function Get-BcDevEnvPipelinePlan {
         'Uncategorized' {
             $plan.EvaluationCompany = $true
             $plan.CompanyCodeunits = @('2', '5193:CreateAllDemoData', '5140:DeleteWarehouseEmployee', '5691')
+        }
+        default {
+            $plan.CompanyCodeunits = @('2')
         }
     }
 

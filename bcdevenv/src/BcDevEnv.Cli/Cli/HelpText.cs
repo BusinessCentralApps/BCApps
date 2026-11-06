@@ -166,9 +166,10 @@ start - Run a container from a built image.
         ["provision"] = """
 provision - (container build step) Restore the staged .bak, register + configure
             the NST from baked binaries, import the license, install any
-            bake-time apps, then create the test company + SUPER user and run the
-            requested company codeunits. Reads build-manifest.json from --context
-            (or cwd).
+            bake-time apps, then create the test company + SUPER user(s) (the
+            current account and, with Windows authentication, the server's
+            NETWORK SERVICE account) and run the requested company codeunits.
+            Reads build-manifest.json from --context (or cwd).
 """,
         ["serve"] = "serve - (container entrypoint) Start SQL + the NST and keep the container alive.",
     };

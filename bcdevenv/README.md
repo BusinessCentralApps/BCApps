@@ -222,10 +222,14 @@ build mode it:
    invalid zip is deleted and downloaded again) and compiles the test runner app
    with that platform's AL compiler;
 3. `create-env` creates an **empty** platform database (no Cronus/demo data),
-   `build-image` provisions it with all the apps plus the test runner (and, for
-   `IntegrationTest`/`Uncategorized` build modes, creates the company and runs the
-   same demo-data codeunits as `build\scripts\ImportTestDataInBcContainer.ps1`), and
-   `start` runs the container;
+   `build-image` provisions it with all the apps plus the test runner, creates the
+   company and runs the same company codeunits as
+   `build\scripts\ImportTestDataInBcContainer.ps1` (`Company-Initialize` for every
+   test type, which upstream's client-session login runs for `UnitTest`; plus the
+   Contoso demo data for `IntegrationTest`/`Uncategorized`), maps the build account
+   and, with Windows authentication, the server's own account (`NT AUTHORITY\NETWORK
+   SERVICE`, which the API tests' default-credential calls to the server
+   authenticate as) to SUPER users, and `start` runs the container;
 4. selects the test apps like the project's `.AL-Go\RunTestsInBcContainer.ps1`
    override (the test-type bucket from `build\projects.json`/`build\groups.json` when
    the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
@@ -262,6 +266,15 @@ refuses to bake apps into a `create-env` database without `--license`.
 workspace compilation, `testType` `Legacy` (demo data generated through a page
 action), and the RU projects (company initialization must be interleaved with the
 app installation). Upgrade testing from the previous release is not performed.
+
+**Known difference from AL-Go/BcContainerHelper.** The tests run inside an OData
+web-service call (the `BcDevEnvTestRunner` codeunit), not in a client session
+(BcContainerHelper drives the test tool page through the web client's client
+services endpoint). A web-service session has no client UI, so tests that open
+`TestPage`s, report request pages or rely on UI handlers fail with
+`NotSupportedException`/"cannot be used in background or server sessions" errors.
+Running them needs a client-session test runner (web server components in the image
+plus `Microsoft.Dynamics.Framework.UI.Client`), which bcdevenv does not provide yet.
 
 The build jobs of the `CI/CD` and `Pull Request Build` workflows run on `windows-2022`
 (`gitHubRunner` in the `repositories: ["BCApps"]` conditional settings of
