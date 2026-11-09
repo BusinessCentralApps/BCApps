@@ -7,8 +7,10 @@
     The pipeline takes the apps already compiled by AL-Go's CompileApps action (workspace
     compilation), creates an EMPTY-database Business Central container with the bcdevenv CLI
     from the BCPlatform version pinned in build/Packages.json, installs the project's apps and
-    test apps into it and runs the tests through the BcDevEnvTestRunner OData service, honoring
-    the DisabledTests folders (src/DisabledTests) before execution.
+    test apps into it and runs the tests, honoring the DisabledTests folders (src/DisabledTests)
+    before execution. The BcDevEnvTestRunner OData service selects the tests (test type, test
+    isolation pass, DisabledTests); by default the AL tool's runtests executes them in a client
+    session (test executor 'altool'), or the OData service itself does (test executor 'odata').
 
     Nothing in here uses BcContainerHelper / NavContainerHelper. The functions are kept pure where
     possible so they can be covered by Pester (build/scripts/tests/BcDevEnvPipeline.Test.ps1).
@@ -28,6 +30,16 @@ $script:SupportedTestTypes = @('', 'UnitTest', 'IntegrationTest', 'Uncategorized
 # Codeunits of the Microsoft test framework used by the native BCApps pipeline.
 $script:IsolatedTestRunnerId = 130450
 $script:IsolationDisabledTestRunnerId = 130451
+
+# Test executors of bcdevenv run-tests: 'altool' runs the selected tests in a client session through the
+# AL tool's runtests (development endpoint), 'odata' runs them with the BcDevEnvTestRunner OData service.
+$script:SupportedTestExecutors = @('altool', 'odata')
+$script:DefaultTestExecutor = 'altool'
+# Microsoft.Dynamics.BusinessCentral.Development.Tools. 30.0.42.60748-beta cannot be used: it refuses the
+# platform 30.0 server ("Tool supports Web API <= 7.0, debuggers <= 8.0; server Web API 8.0, Debugger 9.0").
+$script:AlToolPackageId = 'microsoft.dynamics.businesscentral.development.tools'
+$script:DefaultAlToolVersion = '30.0.44.47290-beta'
+$script:DefaultAppTestTimeoutMinutes = 240
 
 <#
 .SYNOPSIS
@@ -1238,7 +1250,129 @@ exit 1
 
 <#
 .SYNOPSIS
+    Resolves the test executor: action inputs win over the AL-Go settings bcdevenvTestExecutor,
+    bcdevenvAlToolVersion and bcdevenvAppTestTimeoutMinutes, which win over the defaults (altool,
+    the pinned AL tool version, 240 minutes per test app and pass).
+#>
+function Get-BcDevEnvTestExecutorSettings {
+    param(
+        [AllowNull()] $Settings,
+        [AllowEmptyString()] [string] $Executor = '',
+        [AllowEmptyString()] [string] $AlToolVersion = '',
+        [AllowEmptyString()] [string] $AppTimeoutMinutes = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Executor)) { $Executor = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvTestExecutor' -Default '') }
+    if ([string]::IsNullOrWhiteSpace($Executor)) { $Executor = $script:DefaultTestExecutor }
+    $Executor = $Executor.Trim().ToLowerInvariant()
+    if ($script:SupportedTestExecutors -notcontains $Executor) {
+        throw "Unknown test executor '$Executor'. Supported: $($script:SupportedTestExecutors -join ', ')."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($AlToolVersion)) { $AlToolVersion = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvAlToolVersion' -Default '') }
+    if ([string]::IsNullOrWhiteSpace($AlToolVersion)) { $AlToolVersion = $script:DefaultAlToolVersion }
+    $AlToolVersion = $AlToolVersion.Trim()
+    if ($AlToolVersion -notmatch '^\d+(\.\d+){2,3}(-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+        throw "Invalid AL tool version '$AlToolVersion'. Expected a NuGet version of Microsoft.Dynamics.BusinessCentral.Development.Tools, e.g. $($script:DefaultAlToolVersion)."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($AppTimeoutMinutes)) { $AppTimeoutMinutes = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvAppTestTimeoutMinutes' -Default '') }
+    $timeout = $script:DefaultAppTestTimeoutMinutes
+    if (-not [string]::IsNullOrWhiteSpace($AppTimeoutMinutes)) {
+        $parsed = 0
+        if (-not [int]::TryParse($AppTimeoutMinutes.Trim(), [ref]$parsed) -or $parsed -le 0) {
+            throw "Invalid test timeout '$AppTimeoutMinutes' (minutes per test app and pass). Expected a positive integer."
+        }
+        $timeout = $parsed
+    }
+
+    return [pscustomobject]@{
+        Executor          = $Executor
+        AlToolVersion     = $AlToolVersion
+        AppTimeoutMinutes = $timeout
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the nuget.org download URL of the AL tool package (Microsoft.Dynamics.BusinessCentral.Development.Tools).
+#>
+function Get-BcDevEnvAlToolPackageUrl {
+    param([Parameter(Mandatory = $true)] [string] $Version)
+
+    $id = $script:AlToolPackageId
+    $lower = $Version.Trim().ToLowerInvariant()
+    return "https://api.nuget.org/v3-flatcontainer/$id/$lower/$id.$lower.nupkg"
+}
+
+<#
+.SYNOPSIS
+    Returns the folder of altool.dll in an extracted AL tool package (tools\<framework>\any), preferring
+    net10.0, then the highest framework.
+#>
+function Find-BcDevEnvAlToolFolder {
+    param([Parameter(Mandatory = $true)] [string] $PackageDir)
+
+    $preferred = Join-Path $PackageDir 'tools\net10.0\any'
+    if (Test-Path -LiteralPath (Join-Path $preferred 'altool.dll') -PathType Leaf) { return (Resolve-Path -LiteralPath $preferred).Path }
+    $toolsDir = Join-Path $PackageDir 'tools'
+    $candidates = @()
+    if (Test-Path -LiteralPath $toolsDir -PathType Container) {
+        foreach ($framework in @(Get-ChildItem -LiteralPath $toolsDir -Directory)) {
+            $folder = Join-Path $framework.FullName 'any'
+            if (-not (Test-Path -LiteralPath (Join-Path $folder 'altool.dll') -PathType Leaf)) { continue }
+            $version = [version]'0.0'
+            if ($framework.Name -match '^net(\d+)\.(\d+)$') { $version = [version]"$($matches[1]).$($matches[2])" }
+            $candidates += [pscustomobject]@{ Folder = $folder; Version = $version }
+        }
+    }
+    if ($candidates.Count -eq 0) { throw "altool.dll (tools\<framework>\any) was not found in the AL tool package '$PackageDir'." }
+    return @($candidates | Sort-Object -Property Version -Descending)[0].Folder
+}
+
+<#
+.SYNOPSIS
+    Returns the Windows PowerShell script that checks, inside the container, that the AL tool and dotnet
+    are in place and waits until the development endpoint accepts connections.
+#>
+function Get-BcDevEnvAlToolReadinessScript {
+    param(
+        [Parameter(Mandatory = $true)] [string] $AlToolPath,
+        [Parameter(Mandatory = $true)] [string] $DotnetPath,
+        [int] $Port = 7049,
+        [int] $Attempts = 30,
+        [int] $DelaySeconds = 5
+    )
+
+    $alTool = ConvertTo-BcDevEnvPowerShellLiteral $AlToolPath
+    $dotnet = ConvertTo-BcDevEnvPowerShellLiteral $DotnetPath
+    return @"
+`$ErrorActionPreference = 'Stop'
+foreach (`$file in @($alTool, $dotnet)) {
+  if (-not (Test-Path -LiteralPath `$file -PathType Leaf)) { Write-Host "Not found in the container: `$file"; exit 1 }
+}
+`$lastError = 'no connection'
+for (`$i = 1; `$i -le $Attempts; `$i++) {
+  `$client = New-Object System.Net.Sockets.TcpClient
+  try {
+    `$client.Connect('localhost', $Port)
+    Write-Host "The development endpoint (port $Port) accepts connections (attempt `$i)."
+    exit 0
+  } catch { `$lastError = `$_.Exception.Message } finally { `$client.Close() }
+  Start-Sleep -Seconds $DelaySeconds
+}
+Write-Host "The development endpoint (port $Port) did not accept connections: `$lastError"
+exit 1
+"@
+}
+
+<#
+.SYNOPSIS
     Builds the bcdevenv run-tests arguments for one app and one test pass.
+.DESCRIPTION
+    With -Executor altool the BcDevEnvTestRunner still selects the tests (test type, isolation pass,
+    DisabledTests) and the AL tool (-AlToolPath, run with -DotnetPath) executes them through the
+    development endpoint on -DevPort, within -AppTimeoutMinutes for the app and pass.
 #>
 function Get-BcDevEnvRunTestsArguments {
     param(
@@ -1249,7 +1383,13 @@ function Get-BcDevEnvRunTestsArguments {
         [AllowEmptyCollection()] [string[]] $DisabledTestsRoots = @(),
         [Parameter(Mandatory = $true)] [string] $ResultFile,
         [string] $SuiteName = 'BusinessCentral',
-        [int] $TimeoutMinutes = 60
+        [int] $TimeoutMinutes = 60,
+        [ValidateSet('odata', 'altool')] [string] $Executor = 'odata',
+        [string] $AlToolPath = '',
+        [string] $DotnetPath = '',
+        [int] $DevPort = 7049,
+        [string] $ServerInstance = 'BC',
+        [int] $AppTimeoutMinutes = 240
     )
 
     $arguments = @(
@@ -1272,6 +1412,16 @@ function Get-BcDevEnvRunTestsArguments {
         '--allow-failures',
         '--allow-empty'
     )
+    if ($Executor -eq 'altool') {
+        if ([string]::IsNullOrWhiteSpace($AlToolPath)) { throw 'The altool test executor needs -AlToolPath.' }
+        $arguments += @('--executor', 'altool', '--altool', $AlToolPath)
+        if (-not [string]::IsNullOrWhiteSpace($DotnetPath)) { $arguments += @('--dotnet', $DotnetPath) }
+        $arguments += @(
+            '--dev-port', [string]$DevPort,
+            '--server-instance', $ServerInstance,
+            '--app-timeout-minutes', [string]$AppTimeoutMinutes
+        )
+    }
     return $arguments
 }
 

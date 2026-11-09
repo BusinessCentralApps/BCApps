@@ -4,8 +4,8 @@
 > [BusinessCentralApps/bcdevenv](https://github.com/BusinessCentralApps/bcdevenv) at commit
 > `16e2402765a5a1bdebdab3c12fbaf462ea3739b8` (the `bcdevenv/` CLI folder; the AL test-runner
 > app that lived in that repository's `build/testrunner/` is now [`testrunner/`](testrunner/app.json)).
-> Changes made here: the per-codeunit test protocol and DisabledTests support in `run-tests`
-> and the runner app, `build-image` company/server-setting options and license checks, and the
+> Changes made here: the per-codeunit test protocol, DisabledTests support and the AL tool
+> executor in `run-tests` and the runner app, `build-image` company/server-setting options and license checks, and the
 > SQL Server Express setup script (`container/Install-SqlExpress.ps1`, replacing Chocolatey).
 >
 > In this repository the CLI drives the CI build: the
@@ -174,6 +174,28 @@ app (`BcDevEnvTestRunner` web service):
   runs**), then one `RunCodeunit` call per codeunit, so a hanging or crashing codeunit
   is reported against that codeunit instead of losing the whole run.
 
+With `per-codeunit`, `--executor` chooses who runs the selected tests:
+
+- `odata` (default) — the runner's `RunCodeunit` over OData. That is a web-service
+  (background) session, so tests that open `TestPage`s or report request pages fail.
+- `altool` — the AL tool's `runtests` (`--altool <altool.dll|altool.exe>`), which runs
+  the tests in a **client session** through the development endpoint's test runner
+  hub (`--dev-server`, `--dev-port` 7049, `--server-instance`), so `TestPage`s work.
+  `PrepareTests` still does the selection (test type, isolation pass, DisabledTests),
+  and only the enabled methods of the remaining codeunits are sent
+  (`--testgroups [{"codeunitId":N,"testMethods":[...]}]`, an empty list when no
+  method of the codeunit is disabled; codeunits disabled with `*` are not sent at
+  all). The codeunits go in batches (`--altool-batch-size`, default 20) within a
+  total time budget (`--app-timeout-minutes`, default 240). The server's
+  development test runner picks the runner codeunit itself, honouring each
+  codeunit's `RequiredTestIsolation`; `--test-runner-codeunit-id` only applies to
+  the OData executor. The AL tool exits non-zero both for failing tests and for
+  errors, so its JSON output decides: a batch without a parseable result (`data`)
+  — no connection, authentication, version mismatch, timeout — fails every test it
+  contained as an infrastructure error, and a selected test without a result is
+  failed as well. The AL tool's `OnRun` entries are not reported as tests (a failed
+  `OnRun` becomes the reason for the codeunit's missing results).
+
 ### DisabledTests
 
 `--disabled-tests <root>` (repeatable) together with `--app-name <name>` reads
@@ -246,10 +268,22 @@ build mode it:
 4. selects the test apps like the project's `.AL-Go\RunTestsInBcContainer.ps1`
    override (the test-type bucket from `build\projects.json`/`build\groups.json` when
    the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
-   `run-tests --protocol per-codeunit` per app and isolation pass (runner 130450,
-   and 130451 for codeunits that require isolation `Disabled`), with every
-   `DisabledTests` folder of the repository (`src\DisabledTests`) copied into the
-   container;
+   `run-tests --protocol per-codeunit` per app and isolation pass (the codeunits that
+   require isolation `Disabled` separately), with every `DisabledTests` folder of the
+   repository (`src\DisabledTests`) copied into the container. The tests are executed
+   by the **AL tool** (`--executor altool`, see [Running tests](#running-tests)): the
+   `Microsoft.Dynamics.BusinessCentral.Development.Tools` package is downloaded from
+   nuget.org (with retries), its `tools\net10.0\any` folder is copied into the
+   container (`C:\altool`) and run with the image's .NET host, after a check that the
+   development endpoint (port 7049) accepts connections. The version defaults to
+   `30.0.44.47290-beta`: `30.0.42.60748-beta` refuses every call against the
+   `BCPlatform` 30.0 server ("supports Web API ≤ 7.0, debuggers ≤ 8.0"; the server
+   has Web API 8.0 and debugger 9.0). Each app has a time budget of 240 minutes.
+   Override them with the action inputs `testExecutor` (`altool`/`odata`; `odata`
+   is the previous web-service executor, kept as a fallback), `alToolVersion` and
+   `appTestTimeoutMinutes`, or the AL-Go settings `bcdevenvTestExecutor`,
+   `bcdevenvAlToolVersion` and `bcdevenvAppTestTimeoutMinutes`. The log names the
+   executor of every app and pass (`Tests: <app> - <pass> (executor altool <version>)`);
 5. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
    `AnalyzeTests`) and `<project>\.buildartifacts\TestResults.xml` (uploaded test
    results artifact); the log is written to `<project>\BuildOutput.txt`, and on
@@ -280,20 +314,24 @@ workspace compilation, `testType` `Legacy` (demo data generated through a page
 action), and the RU projects (company initialization must be interleaved with the
 app installation). Upgrade testing from the previous release is not performed.
 
-**Known difference from AL-Go/BcContainerHelper.** The tests run inside an OData
-web-service call (the `BcDevEnvTestRunner` codeunit), not in a client session
-(BcContainerHelper drives the test tool page through the web client's client
-services endpoint). A web-service session has no client UI, so tests that open
-`TestPage`s, report request pages or rely on UI handlers fail with
-`NotSupportedException`/"cannot be used in background or server sessions" errors.
-Running them needs a client-session test runner (web server components in the image
-plus `Microsoft.Dynamics.Framework.UI.Client`), which bcdevenv does not provide yet.
-The same applies to tests that expect the data a client login creates: `System
-Initialization` only records the signup context and the user's login information
-for client sessions, so e.g. `User Login Time Tracker Test` and `System
-Initialization Test` fail with "User Login"/"Signup Context Values" records that do
-not exist. Some tests also depend on data that only specific upstream setups create
-(for example the AMC banking license user), and are not seeded generically.
+**Known differences from AL-Go/BcContainerHelper.** The AL tool runs the tests in a
+client session through the development endpoint's test runner hub, while
+BcContainerHelper drives the test tool page (page 130455) through the web client's
+client services endpoint. The hub only lets the caller choose the codeunits and
+methods; the server's development test runner chooses the runner codeunit, so the
+AL hooks of the `Test Runner` app's runners 130450/130451 (for example the
+`Permissions Mock` start/stop around each method and the `Library - Random` seed) do
+not run, and tests that rely on them may behave differently. Sending a non-empty
+method list (codeunits with some methods disabled) has not been verified against a
+live server yet. With `testExecutor: odata` the tests run in a web-service session
+instead, where `TestPage`s, report request pages and UI handlers fail with
+`NotSupportedException`/"cannot be used in background or server sessions" errors,
+and tests that expect the data a client login creates fail (`System Initialization`
+records the signup context and the user's login information only for client
+sessions; e.g. `User Login Time Tracker Test`, `System Initialization Test`); whether
+the AL tool's test session creates that data has not been verified yet.
+Some tests also depend on data that only specific upstream setups create (for
+example the AMC banking license user), and are not seeded generically.
 
 The build jobs of the `CI/CD` and `Pull Request Build` workflows run on `windows-2022`
 (`gitHubRunner` in the `repositories: ["BCApps"]` conditional settings of

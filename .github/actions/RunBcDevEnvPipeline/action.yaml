@@ -51,6 +51,25 @@ inputs:
       AL-Go does without licenseFileUrl; an empty platform database holds no license of its own.
     required: false
     default: licenseFileUrl
+  testExecutor:
+    description: >-
+      How the selected tests are executed: altool (the AL tool's runtests in a client session through
+      the development endpoint) or odata (the BcDevEnvTestRunner OData service). Empty uses the AL-Go
+      setting bcdevenvTestExecutor, else altool. The BcDevEnvTestRunner selects the tests in both cases.
+    required: false
+    default: ''
+  alToolVersion:
+    description: >-
+      NuGet version of Microsoft.Dynamics.BusinessCentral.Development.Tools used by the altool executor.
+      Empty uses the AL-Go setting bcdevenvAlToolVersion, else the pinned default (30.0.44.47290-beta).
+    required: false
+    default: ''
+  appTestTimeoutMinutes:
+    description: >-
+      Timeout of the altool executor per test app and test pass, in minutes. Empty uses the AL-Go setting
+      bcdevenvAppTestTimeoutMinutes, else 240.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -68,6 +87,9 @@ runs:
         _installTestAppsJson: ${{ inputs.installTestAppsJson }}
         _previousAppsPath: ${{ inputs.previousAppsPath }}
         _licenseSecretName: ${{ inputs.licenseSecretName }}
+        _testExecutor: ${{ inputs.testExecutor }}
+        _alToolVersion: ${{ inputs.alToolVersion }}
+        _appTestTimeoutMinutes: ${{ inputs.appTestTimeoutMinutes }}
         DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         DOTNET_NOLOGO: '1'
       run: |
@@ -76,12 +98,15 @@ runs:
         $projectPath = if ($project -eq '.') { $env:GITHUB_WORKSPACE } else { Join-Path $env:GITHUB_WORKSPACE $project }
         $buildOutput = Join-Path $projectPath 'BuildOutput.txt'
         $parameters = @{
-          Project             = $project
-          BuildMode           = $env:_buildMode
-          InstallAppsJson     = $env:_installAppsJson
-          InstallTestAppsJson = $env:_installTestAppsJson
-          LicenseSecretName   = $env:_licenseSecretName
-          PreviousAppsPath    = $env:_previousAppsPath
+          Project               = $project
+          BuildMode             = $env:_buildMode
+          InstallAppsJson       = $env:_installAppsJson
+          InstallTestAppsJson   = $env:_installTestAppsJson
+          LicenseSecretName     = $env:_licenseSecretName
+          PreviousAppsPath      = $env:_previousAppsPath
+          TestExecutor          = $env:_testExecutor
+          AlToolVersion         = $env:_alToolVersion
+          AppTestTimeoutMinutes = $env:_appTestTimeoutMinutes
         }
         try {
           & (Join-Path $env:GITHUB_ACTION_PATH 'RunBcDevEnvPipeline.ps1') @parameters *>&1 | Tee-Object -FilePath $buildOutput -Append

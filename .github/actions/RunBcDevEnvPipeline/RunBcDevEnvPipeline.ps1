@@ -9,8 +9,12 @@
          build/Packages.json (platform artifact only - no application database, no demo data),
       3. installs the project's apps and test apps (compiled by the CompileApps action) together with
          the dependency apps downloaded by DownloadProjectDependencies,
-      4. runs the tests through the BcDevEnvTestRunner OData service, excluding the tests listed in the
-         repository's DisabledTests folders (src/DisabledTests) BEFORE they are executed.
+      4. runs the tests, excluding the tests listed in the repository's DisabledTests folders
+         (src/DisabledTests) BEFORE they are executed: the BcDevEnvTestRunner OData service selects
+         the tests of each pass (test type, required test isolation, DisabledTests) and, with the
+         default test executor 'altool', the AL tool's runtests (Microsoft.Dynamics.BusinessCentral.
+         Development.Tools from nuget.org) executes them in a client session through the
+         development endpoint; with the test executor 'odata' the OData service executes them.
 
     Test results are written to <project>/TestResults.xml (read by AL-Go's AnalyzeTests) and
     <project>/.buildartifacts/TestResults.xml (uploaded as the test results artifact).
@@ -22,7 +26,10 @@ param(
     [string] $InstallAppsJson = '',
     [string] $InstallTestAppsJson = '',
     [string] $LicenseSecretName = 'licenseFileUrl',
-    [string] $PreviousAppsPath = ''
+    [string] $PreviousAppsPath = '',
+    [string] $TestExecutor = '',
+    [string] $AlToolVersion = '',
+    [string] $AppTestTimeoutMinutes = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +55,10 @@ $odataUrl = 'http://localhost:7048/BC/ODataV4'
 $containerRunFolder = 'C:\bcdevenv-run'
 $runnerAppId = 'b7f1d6c2-6a1e-4d3a-9d7c-9a2b5e4f0c11'
 $runnerDependencyIds = @('63ca2fa4-4f03-4f2b-a480-172fef340d3f', '23de40a6-dfe8-4f80-80db-d70f83ce8caf')
+$containerAlToolFolder = 'C:\altool'
+$containerAlTool = "$containerAlToolFolder\altool.dll"
+$containerDotnet = 'C:\Program Files\dotnet\dotnet.exe'
+$devPort = 7049
 
 function Write-Section([string] $Title) { Write-Host "::endgroup::"; Write-Host "::group::$Title" }
 
@@ -81,6 +92,16 @@ Write-Host "Test type:     $(if ($plan.TestType) { $plan.TestType } else { '(non
 Write-Host "Company:       $($plan.CompanyName)$(if ($plan.EvaluationCompany) { ' (evaluation company)' })"
 Write-Host "Company setup: $(if (@($plan.CompanyCodeunits).Count) { $plan.CompanyCodeunits -join ', ' } else { '(empty company)' })"
 foreach ($pass in $plan.Passes) { Write-Host "Test pass:     $($pass.Name), test runner $($pass.RunnerId)" }
+$executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes
+$executorLabel = if ($executor.Executor -eq 'altool') { "altool $($executor.AlToolVersion)" } else { 'odata' }
+if ($plan.Action -eq 'Test') {
+    if ($executor.Executor -eq 'altool') {
+        Write-Host "Test executor: altool - AL tool $($executor.AlToolVersion) runtests (client session, development endpoint port $devPort), $($executor.AppTimeoutMinutes) min per test app and pass; the BcDevEnvTestRunner selects the tests"
+    }
+    else {
+        Write-Host "Test executor: odata - the BcDevEnvTestRunner OData service selects and runs the tests"
+    }
+}
 if ($PreviousAppsPath -and (Test-Path -LiteralPath $PreviousAppsPath)) {
     Write-Host "::notice::Previous release apps were downloaded, but the bcdevenv pipeline installs into an empty database and does not perform upgrade testing."
 }
@@ -196,6 +217,19 @@ try {
         if (-not (Test-Path -LiteralPath $runnerApp)) { throw 'The AL compiler did not produce the BcDevEnv Test Runner app.' }
     }
 
+    # --- AL tool (test executor) ----------------------------------------------------------------------
+    $alToolBin = $null
+    if ($selected.Count -gt 0 -and $executor.Executor -eq 'altool') {
+        Write-Section "AL tool $($executor.AlToolVersion) (test executor)"
+        $alToolPackage = Join-Path $work 'altool.nupkg'
+        $alToolPackageDir = Join-Path $work 'altool'
+        Save-BcDevEnvDownload -Uri (Get-BcDevEnvAlToolPackageUrl -Version $executor.AlToolVersion) -OutFile $alToolPackage -ValidateZip -Description "Downloading the AL tool $($executor.AlToolVersion)" | Out-Null
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($alToolPackage, $alToolPackageDir)
+        Remove-Item -LiteralPath $alToolPackage -Force
+        $alToolBin = Find-BcDevEnvAlToolFolder -PackageDir $alToolPackageDir
+        Write-Host "AL tool: $alToolBin"
+    }
+
     # --- License ------------------------------------------------------------------------------------
     Write-Section 'License'
     $licensePath = Resolve-BcDevEnvLicense -SecretsJson "$env:Secrets" -SecretName $LicenseSecretName -Destination (Join-Path $work 'license')
@@ -258,6 +292,16 @@ try {
     }
     if ($disabledRoots.Count -eq 0) { Write-Host 'No DisabledTests folders found.' }
 
+    if ($alToolBin) {
+        Write-Section 'AL tool in the container'
+        Invoke-Docker -Arguments @('cp', $alToolBin, "$($names.ContainerName):$containerAlToolFolder") -Description 'Copying the AL tool into the container' | Out-Null
+        $alToolProbe = ConvertTo-BcDevEnvEncodedScript -Script (Get-BcDevEnvAlToolReadinessScript -AlToolPath $containerAlTool -DotnetPath $containerDotnet -Port $devPort)
+        $alToolProbeExit = Invoke-Docker -Arguments @('exec', $names.ContainerName, 'powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $alToolProbe) -AllowFailure -Description 'AL tool readiness probe'
+        if ($alToolProbeExit -ne 0) {
+            throw "The altool test executor cannot run in the container (see the AL tool readiness probe above). Set the bcdevenvTestExecutor setting (or the testExecutor input) to 'odata' to run the tests through the OData service instead."
+        }
+    }
+
     # --- Tests ------------------------------------------------------------------------------------------
     $resultsFolder = Join-Path $work 'results'
     New-Item -ItemType Directory -Path $resultsFolder -Force | Out-Null
@@ -269,11 +313,12 @@ try {
         $appIndex = 0
         foreach ($app in $selected) {
             $appIndex++
-            Write-Section "Tests: $($app.Name) - $($pass.Name)"
+            Write-Section "Tests: $($app.Name) - $($pass.Name) (executor $executorLabel)"
             $resultName = '{0:D2}-{1:D3}.xml' -f $passIndex, $appIndex
             $containerResult = "$containerRunFolder\results\$resultName"
             $hostResult = Join-Path $resultsFolder $resultName
-            $runArguments = Get-BcDevEnvRunTestsArguments -ODataUrl $odataUrl -CompanyName $plan.CompanyName -App $app -Pass $pass -DisabledTestsRoots $containerDisabledRoots -ResultFile $containerResult
+            $runArguments = Get-BcDevEnvRunTestsArguments -ODataUrl $odataUrl -CompanyName $plan.CompanyName -App $app -Pass $pass -DisabledTestsRoots $containerDisabledRoots -ResultFile $containerResult `
+                -Executor $executor.Executor -AlToolPath $containerAlTool -DotnetPath $containerDotnet -DevPort $devPort -ServerInstance 'BC' -AppTimeoutMinutes $executor.AppTimeoutMinutes
             $exitCode = Invoke-Docker -Arguments (@('exec', '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli) + $runArguments) -AllowFailure -Description "bcdevenv run-tests ($($app.Name))"
             $copyExit = Invoke-Docker -Arguments @('cp', "$($names.ContainerName):$containerResult", $hostResult) -AllowFailure -Description 'Copying the test results'
             if ($copyExit -ne 0 -or -not (Test-Path -LiteralPath $hostResult)) {
@@ -282,7 +327,7 @@ try {
             }
             $resultFiles += $hostResult
             $summary = Get-BcDevEnvJUnitSummary -Path $hostResult
-            Write-Host ("{0} [{1}]: {2} test(s), {3} failed, {4} skipped" -f $app.Name, $pass.Name, $summary.Tests, ($summary.Failures + $summary.Errors), $summary.Skipped)
+            Write-Host ("{0} [{1}, executor {2}]: {3} test(s), {4} failed, {5} skipped" -f $app.Name, $pass.Name, $executorLabel, $summary.Tests, ($summary.Failures + $summary.Errors), $summary.Skipped)
             if ($exitCode -ne 0) {
                 $infrastructureErrors += "$($app.Name) [$($pass.Name)]: run-tests reported runner/DisabledTests errors (exit code $exitCode); see its log above."
             }
@@ -292,7 +337,7 @@ try {
     Write-Section 'Test results'
     $outputs = @((Join-Path $projectPath 'TestResults.xml'), (Join-Path $projectPath '.buildartifacts/TestResults.xml'))
     $counts = Merge-BcDevEnvJUnitResults -InputFiles $resultFiles -OutputFiles $outputs -SuiteName 'BusinessCentral'
-    Write-Host ("Total: {0} test(s), {1} failure(s), {2} error(s), {3} skipped (DisabledTests), {4:0.#}s" -f $counts.Tests, $counts.Failures, $counts.Errors, $counts.Skipped, $counts.Time)
+    Write-Host ("Total: {0} test(s), {1} failure(s), {2} error(s), {3} skipped (DisabledTests or by the test runner), {4:0.#}s; executor {5}" -f $counts.Tests, $counts.Failures, $counts.Errors, $counts.Skipped, $counts.Time, $executorLabel)
     foreach ($output in $outputs) { Write-Host "Written: $output" }
     Write-Host "::endgroup::"
 

@@ -63,6 +63,9 @@ public static class TestSkipReasons
     /// <summary>The test was excluded before execution by a DisabledTests entry.</summary>
     public const string DisabledByDisabledTests = "Disabled by DisabledTests";
 
+    /// <summary>A selected test the test runner (or the AL tool) reported as skipped.</summary>
+    public const string SkippedByTestRunner = "Skipped by the test runner";
+
     /// <summary>Start of the failure message for a selected test that never produced a result.</summary>
     public const string NotExecutedPrefix = "The test was selected but not executed";
 }

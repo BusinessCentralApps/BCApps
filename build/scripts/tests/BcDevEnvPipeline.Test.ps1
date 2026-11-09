@@ -398,6 +398,156 @@ Describe "Get-BcDevEnvRunTestsArguments" {
         $arguments | Should -Not -Contain '--test-type'
         $arguments | Should -Not -Contain '--required-test-isolation'
         $arguments | Should -Not -Contain '--disabled-tests'
+        $arguments | Should -Not -Contain '--executor'
+    }
+
+    It "appends the altool executor options after the selection options" {
+        $app = [pscustomobject]@{ Id = 'aaaa'; Name = 'Library Tests' }
+        $pass = [pscustomobject]@{ TestType = 'IntegrationTest'; Isolation = 'None'; RunnerId = 130450 }
+        $arguments = Get-BcDevEnvRunTestsArguments -ODataUrl 'http://localhost:7048/BC/ODataV4' -CompanyName 'CRONUS' -App $app -Pass $pass -DisabledTestsRoots @('C:\d\0') -ResultFile 'C:\r\1.xml' `
+            -Executor 'altool' -AlToolPath 'C:\altool\altool.dll' -DotnetPath 'C:\Program Files\dotnet\dotnet.exe' -DevPort 7049 -ServerInstance 'BC' -AppTimeoutMinutes 90
+        ($arguments -join ' ') | Should -Be 'run-tests --odata-url http://localhost:7048/BC/ODataV4 --service-name BcDevEnvTestRunner --company CRONUS --protocol per-codeunit --extension aaaa --app-name Library Tests --disabled-tests C:\d\0 --test-type IntegrationTest --required-test-isolation None --test-runner-codeunit-id 130450 --result-file C:\r\1.xml --suite-name BusinessCentral --timeout-minutes 60 --allow-failures --allow-empty --executor altool --altool C:\altool\altool.dll --dotnet C:\Program Files\dotnet\dotnet.exe --dev-port 7049 --server-instance BC --app-timeout-minutes 90'
+        $arguments | Should -Contain 'C:\Program Files\dotnet\dotnet.exe'
+    }
+
+    It "requires the AL tool path for the altool executor and rejects unknown executors" {
+        $app = [pscustomobject]@{ Id = 'i'; Name = 'n' }
+        $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
+        { Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' } | Should -Throw '*needs -AlToolPath*'
+        { Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'webclient' } | Should -Throw
+    }
+}
+
+Describe "Get-BcDevEnvTestExecutorSettings" {
+    It "defaults to the altool executor with the pinned AL tool version (not 30.0.42.60748-beta) and 240 minutes" {
+        $executor = Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings)
+        $executor.Executor | Should -Be 'altool'
+        $executor.AlToolVersion | Should -Be '30.0.44.47290-beta'
+        $executor.AppTimeoutMinutes | Should -Be 240
+    }
+
+    It "reads the bcdevenv settings and lets non-empty inputs override them" {
+        $settings = New-TestSettings @{ bcdevenvTestExecutor = 'OData'; bcdevenvAlToolVersion = '30.0.45.1'; bcdevenvAppTestTimeoutMinutes = 30 }
+        $fromSettings = Get-BcDevEnvTestExecutorSettings -Settings $settings
+        $fromSettings.Executor | Should -Be 'odata'
+        $fromSettings.AlToolVersion | Should -Be '30.0.45.1'
+        $fromSettings.AppTimeoutMinutes | Should -Be 30
+        $fromInputs = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor ' AlTool ' -AlToolVersion '31.0.1.2-preview.1' -AppTimeoutMinutes '15'
+        $fromInputs.Executor | Should -Be 'altool'
+        $fromInputs.AlToolVersion | Should -Be '31.0.1.2-preview.1'
+        $fromInputs.AppTimeoutMinutes | Should -Be 15
+        (Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor '' -AlToolVersion '' -AppTimeoutMinutes '').Executor | Should -Be 'odata'
+    }
+
+    It "rejects <Case>" -TestCases @(
+        @{ Case = 'an unknown executor'; Arguments = @{ Executor = 'webclient' }; Message = "*Unknown test executor 'webclient'*" }
+        @{ Case = 'an invalid AL tool version'; Arguments = @{ AlToolVersion = 'latest' }; Message = "*Invalid AL tool version 'latest'*" }
+        @{ Case = 'a version with a path'; Arguments = @{ AlToolVersion = '30.0.44.1/../x' }; Message = '*Invalid AL tool version*' }
+        @{ Case = 'a zero timeout'; Arguments = @{ AppTimeoutMinutes = '0' }; Message = "*Invalid test timeout '0'*" }
+        @{ Case = 'a non-numeric timeout'; Arguments = @{ AppTimeoutMinutes = 'abc' }; Message = "*Invalid test timeout 'abc'*" }
+    ) {
+        param($Case, $Arguments, $Message)
+        { Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings) @Arguments } | Should -Throw $Message
+    }
+}
+
+Describe "Get-BcDevEnvAlToolPackageUrl" {
+    It "returns the lower-case nuget.org flat container URL" {
+        Get-BcDevEnvAlToolPackageUrl -Version '30.0.44.47290-Beta' | Should -Be 'https://api.nuget.org/v3-flatcontainer/microsoft.dynamics.businesscentral.development.tools/30.0.44.47290-beta/microsoft.dynamics.businesscentral.development.tools.30.0.44.47290-beta.nupkg'
+    }
+}
+
+Describe "Find-BcDevEnvAlToolFolder" {
+    BeforeEach {
+        $package = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        function New-AlToolFramework([string] $Framework) {
+            $folder = Join-Path $package "tools\$Framework\any"
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $folder 'altool.dll') -Value 'x'
+            return $folder
+        }
+    }
+
+    It "prefers tools\net10.0\any" {
+        New-AlToolFramework 'net8.0' | Out-Null
+        $expected = New-AlToolFramework 'net10.0'
+        Find-BcDevEnvAlToolFolder -PackageDir $package | Should -Be $expected
+    }
+
+    It "falls back to the highest framework" {
+        New-AlToolFramework 'net8.0' | Out-Null
+        $expected = New-AlToolFramework 'net9.0'
+        New-Item -ItemType Directory -Path (Join-Path $package 'tools\net11.0\any') -Force | Out-Null
+        Find-BcDevEnvAlToolFolder -PackageDir $package | Should -Be $expected
+    }
+
+    It "fails when the package has no altool.dll" {
+        New-Item -ItemType Directory -Path (Join-Path $package 'lib') -Force | Out-Null
+        { Find-BcDevEnvAlToolFolder -PackageDir $package } | Should -Throw '*altool.dll*was not found*'
+    }
+}
+
+Describe "Get-BcDevEnvAlToolReadinessScript" {
+    BeforeAll {
+        $shell = (Get-Process -Id $PID).Path
+        $alTool = Join-Path $TestDrive "Contoso's altool.dll"
+        Set-Content -LiteralPath $alTool -Value 'x'
+        function Invoke-Probe([string] $Script) {
+            $output = & $shell -NoProfile -NonInteractive -EncodedCommand (ConvertTo-BcDevEnvEncodedScript -Script $Script) 2>&1
+            return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }
+        }
+    }
+
+    It "produces a parseable script with quoted paths" {
+        $script = Get-BcDevEnvAlToolReadinessScript -AlToolPath $alTool -DotnetPath 'C:\Program Files\dotnet\dotnet.exe' -Port 7049
+        $tokens = $null; $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$tokens, [ref]$errors) | Out-Null
+        @($errors).Count | Should -Be 0
+        $script | Should -Match ([regex]::Escape("'C:\Program Files\dotnet\dotnet.exe'"))
+        $script | Should -Match ([regex]::Escape("Contoso''s altool.dll"))
+    }
+
+    It "fails when the AL tool is missing" {
+        $result = Invoke-Probe (Get-BcDevEnvAlToolReadinessScript -AlToolPath (Join-Path $TestDrive 'missing.dll') -DotnetPath $shell -Port 1 -Attempts 1 -DelaySeconds 0)
+        $result.ExitCode | Should -Be 1
+        $result.Output | Should -Match 'Not found in the container'
+    }
+
+    It "succeeds when the port accepts connections and fails when it does not" {
+        $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $open = Invoke-Probe (Get-BcDevEnvAlToolReadinessScript -AlToolPath $alTool -DotnetPath $shell -Port $port -Attempts 2 -DelaySeconds 0)
+            $open.ExitCode | Should -Be 0
+            $open.Output | Should -Match "port $port\) accepts connections"
+        }
+        finally { $listener.Stop() }
+        $closed = Invoke-Probe (Get-BcDevEnvAlToolReadinessScript -AlToolPath $alTool -DotnetPath $shell -Port $port -Attempts 2 -DelaySeconds 0)
+        $closed.ExitCode | Should -Be 1
+        $closed.Output | Should -Match 'did not accept connections'
+    }
+}
+
+Describe "RunBcDevEnvPipeline action contract" {
+    It "maps every action input passed to the script onto a script parameter, including the test executor inputs" {
+        $actionFolder = Join-Path $PSScriptRoot '../../../.github/actions/RunBcDevEnvPipeline'
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $actionFolder 'RunBcDevEnvPipeline.ps1'), [ref]$tokens, [ref]$errors)
+        @($errors).Count | Should -Be 0
+        $parameters = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $action = Get-Content -Raw -LiteralPath (Join-Path $actionFolder 'action.yaml')
+        $mapped = @([regex]::Matches($action, '(?m)^\s+(\w+)\s+=\s+\$env:_(\w+)\s*$') | ForEach-Object {
+            [pscustomobject]@{ Parameter = $_.Groups[1].Value; Env = $_.Groups[2].Value }
+        })
+        @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'TestExecutor'
+        @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AlToolVersion'
+        @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AppTestTimeoutMinutes'
+        foreach ($entry in $mapped) {
+            $parameters | Should -Contain $entry.Parameter
+            $action | Should -Match ('(?m)^  {0}:\s*$' -f [regex]::Escape($entry.Env))
+            $action | Should -Match ('(?m)^\s+_{0}:\s+\$\{{\{{ inputs\.{0} \}}\}}' -f [regex]::Escape($entry.Env))
+        }
     }
 }
 

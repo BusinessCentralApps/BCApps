@@ -120,6 +120,20 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
                             --test-type, None selects codeunits requiring None or Codeunit)
   --test-runner-codeunit-id <n>  Test runner codeunit for the suite (e.g. 130450, 130451)
 
+  EXECUTOR (who runs the selected tests; per-codeunit protocol only)
+  --executor <odata|altool> odata (default): the runner's RunCodeunit over OData (a background
+                            session: TestPage tests cannot run). altool: the AL tool's runtests
+                            through the development endpoint (a client session, so TestPages
+                            work). PrepareTests still selects the tests (test type, isolation,
+                            DisabledTests); only the enabled methods are sent to the AL tool.
+  --altool <path>           altool.dll (run via dotnet) or altool.exe; required for altool
+  --dotnet <path>           dotnet host for altool.dll (default: %ProgramFiles%\dotnet\dotnet.exe)
+  --dev-server <url>        Development endpoint host (default: http://localhost)
+  --dev-port <n>            Development endpoint port (default: 7049)
+  --altool-batch-size <n>   Test codeunits per runtests call (default: 20)
+  --app-timeout-minutes <n> Total AL tool time budget for this run (default: 240); batches
+                            that do not fit are reported as infrastructure errors
+
   Runner call failures and disabled-test violations fail the command even with --allow-failures.
 """,
         ["build-image"] = """

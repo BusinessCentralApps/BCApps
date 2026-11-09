@@ -84,6 +84,18 @@ public sealed class NavTestService
     /// <summary>Result of a per-codeunit run: the plan, the merged results, and infrastructure errors.</summary>
     public sealed record PerCodeunitRun(TestSuitePlan Plan, TestRunResult Result, IReadOnlyList<string> RunnerErrors);
 
+    /// <summary>
+    /// A prepared codeunit line with its result template, read with GetCodeunitResults before anything
+    /// runs: disabled methods are already "Disabled by DisabledTests" skips and every selected method
+    /// is a "selected but not executed" failure until an executor reports its outcome.
+    /// <see cref="TemplateAvailable"/> is false when the template could not be read; the template is
+    /// then a single RunnerError failure and the codeunit must not be run.
+    /// </summary>
+    public sealed record PreparedCodeunit(PlannedCodeunit Codeunit, TestRunResult Template, bool TemplateAvailable);
+
+    /// <summary>A suite prepared for an external executor (see <see cref="Prepare"/>).</summary>
+    public sealed record PreparedSuite(TestSuitePlan Plan, IReadOnlyList<PreparedCodeunit> Codeunits, IReadOnlyList<string> RunnerErrors);
+
     public const string PrepareAction = "PrepareTests";
     public const string RunCodeunitAction = "RunCodeunit";
     public const string GetCodeunitResultsAction = "GetCodeunitResults";
@@ -133,10 +145,7 @@ public sealed class NavTestService
     {
         using var client = CreateClient(options);
 
-        var prepareUrl = BuildActionUrl(options, PrepareAction);
-        var plan = ParsePlan(Post(client, prepareUrl, BuildPreparePayload(options), options));
-        Log.Info($"Prepared test suite '{plan.TestSuite}' (runner {plan.TestRunnerId}): {plan.Codeunits.Count} codeunit(s), " +
-                 $"{plan.Functions} test method(s), {plan.DisabledFunctions} disabled before execution.");
+        var plan = PrepareSuite(client, options);
 
         var result = new TestRunResult();
         var errors = new List<string>();
@@ -182,6 +191,69 @@ public sealed class NavTestService
         }
 
         return new PerCodeunitRun(plan, result, errors);
+    }
+
+    /// <summary>
+    /// Prepares the suite for an external executor (the AL tool): PrepareTests applies the test type /
+    /// isolation selection and the disabled tests exactly as for <see cref="RunPerCodeunit"/>, then the
+    /// result template of every codeunit line is read with GetCodeunitResults. Nothing is executed.
+    /// </summary>
+    public PreparedSuite Prepare(RunOptions options)
+    {
+        using var client = CreateClient(options);
+        var plan = PrepareSuite(client, options);
+
+        var codeunits = new List<PreparedCodeunit>();
+        var errors = new List<string>();
+        foreach (var codeunit in plan.Codeunits)
+        {
+            try
+            {
+                var template = XUnitResultParser.Parse(Post(client, BuildActionUrl(options, GetCodeunitResultsAction),
+                    BuildCodeunitPayload(options, codeunit.LineNo), options));
+                codeunits.Add(new PreparedCodeunit(codeunit, template, true));
+            }
+            catch (BcDevEnvException ex)
+            {
+                var error = $"Codeunit {codeunit.CodeunitId} {codeunit.Name}: could not read its prepared test methods: {ex.Message}";
+                Log.Error(error);
+                errors.Add(error);
+                codeunits.Add(new PreparedCodeunit(codeunit,
+                    RunnerErrorResult(codeunit, $"Reading the prepared test methods failed: {ex.Message}"), false));
+            }
+        }
+
+        var templateMethods = codeunits.Where(c => c.TemplateAvailable).Sum(c => c.Template.Total);
+        if (errors.Count == 0 && templateMethods != plan.Functions)
+        {
+            var error = $"The runner prepared {plan.Functions} test method(s) but listed {templateMethods}.";
+            Log.Error(error);
+            errors.Add(error);
+        }
+        return new PreparedSuite(plan, codeunits, errors);
+    }
+
+    private TestSuitePlan PrepareSuite(HttpClient client, RunOptions options)
+    {
+        var plan = ParsePlan(Post(client, BuildActionUrl(options, PrepareAction), BuildPreparePayload(options), options));
+        Log.Info($"Prepared test suite '{plan.TestSuite}' (runner {plan.TestRunnerId}): {plan.Codeunits.Count} codeunit(s), " +
+                 $"{plan.Functions} test method(s), {plan.DisabledFunctions} disabled before execution.");
+        return plan;
+    }
+
+    /// <summary>A one-method failed result standing for a codeunit whose results are unavailable.</summary>
+    public static TestRunResult RunnerErrorResult(PlannedCodeunit codeunit, string message)
+    {
+        var result = new TestRunResult();
+        var cu = new TestCodeunitResult
+        {
+            Name = $"Codeunit {codeunit.CodeunitId} {codeunit.Name}",
+            CodeunitId = codeunit.CodeunitId,
+            CodeunitName = codeunit.Name,
+        };
+        cu.Methods.Add(new TestMethodResult { Name = "RunnerError", Outcome = TestOutcome.Failed, Message = message });
+        result.Codeunits.Add(cu);
+        return result;
     }
 
     /// <summary>Parses the JSON suite description returned by PrepareTests.</summary>
@@ -230,21 +302,7 @@ public sealed class NavTestService
         catch (BcDevEnvException ex)
         {
             Log.Error($"Could not recover results for codeunit {codeunit.CodeunitId}: {ex.Message}");
-            var fallback = new TestRunResult();
-            var cu = new TestCodeunitResult
-            {
-                Name = $"Codeunit {codeunit.CodeunitId} {codeunit.Name}",
-                CodeunitId = codeunit.CodeunitId,
-                CodeunitName = codeunit.Name,
-            };
-            cu.Methods.Add(new TestMethodResult
-            {
-                Name = "RunnerError",
-                Outcome = TestOutcome.Failed,
-                Message = $"Runner call failed: {runError} Result recovery failed: {ex.Message}",
-            });
-            fallback.Codeunits.Add(cu);
-            return fallback;
+            return RunnerErrorResult(codeunit, $"Runner call failed: {runError} Result recovery failed: {ex.Message}");
         }
     }
 

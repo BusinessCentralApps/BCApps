@@ -15,6 +15,9 @@ namespace BcDevEnv.Cli.Commands;
 ///   * live (default)             : invoke the toolkit's runner web service over OData v4, either with
 ///                                  the legacy single RunAll call or the per-codeunit protocol
 ///                                  (PrepareTests + one RunCodeunit call per codeunit).
+///   * live, --executor altool    : PrepareTests selects the tests as above, then the AL tool's
+///                                  runtests executes them through the development endpoint (a client
+///                                  session, so TestPages work); see <see cref="AlToolTestRunner"/>.
 ///
 /// --disabled-tests applies the repository's DisabledTests entries BEFORE execution (per-codeunit
 /// protocol only) and afterwards verifies that every matching test was reported as skipped. A
@@ -28,14 +31,17 @@ public static class RunTestsCommand
     public static int Run(ParsedArgs a) => Run(a, new NavTestService());
 
     /// <summary>Runs the command with a specific runner client (tests inject a fake HTTP handler).</summary>
-    public static int Run(ParsedArgs a, NavTestService service)
+    public static int Run(ParsedArgs a, NavTestService service) => Run(a, service, null);
+
+    /// <summary>Runs the command with a specific runner client and AL tool executor (tests inject fakes).</summary>
+    public static int Run(ParsedArgs a, NavTestService service, AlToolTestRunner? alTool)
     {
         var resultFile = a.Get("result-file") ?? Path.Combine("TestResults", "junit.xml");
         var suiteName = a.GetOr("suite-name", "BusinessCentral");
         var allowFailures = a.Flag("allow-failures");
 
         var catalog = LoadCatalog(a);
-        var collected = CollectResults(a, catalog, service);
+        var collected = CollectResults(a, catalog, service, alTool ?? new AlToolTestRunner());
         var run = collected.Run;
 
         JUnitResultWriter.WriteFile(run, resultFile, suiteName);
@@ -105,7 +111,7 @@ public static class RunTestsCommand
             yield return $"Test '{unexpected}' was reported as disabled but matches no DisabledTests entry.";
     }
 
-    private static Collected CollectResults(ParsedArgs a, DisabledTestCatalog? catalog, NavTestService service)
+    private static Collected CollectResults(ParsedArgs a, DisabledTestCatalog? catalog, NavTestService service, AlToolTestRunner alTool)
     {
         // Explicit result files / directories take precedence and need no running server.
         var xmlFiles = new List<string>();
@@ -122,8 +128,8 @@ public static class RunTestsCommand
         if (xmlFiles.Count > 0)
             return new Collected(MergeFromFiles(xmlFiles), Array.Empty<string>());
 
-        // Otherwise run live against a running NST via the toolkit's OData runner.
-        return RunLive(a, catalog, service);
+        // Otherwise run live against a running NST via the toolkit's OData runner (and the AL tool).
+        return RunLive(a, catalog, service, alTool);
     }
 
     private static TestRunResult MergeFromFiles(IEnumerable<string> files)
@@ -141,11 +147,14 @@ public static class RunTestsCommand
         return merged;
     }
 
-    private static Collected RunLive(ParsedArgs a, DisabledTestCatalog? catalog, NavTestService service)
+    private static Collected RunLive(ParsedArgs a, DisabledTestCatalog? catalog, NavTestService service, AlToolTestRunner alTool)
     {
         var odataUrl = a.Get("odata-url") ?? BuildODataUrl(a);
-        var perCodeunit = UsePerCodeunitProtocol(a);
+        var executor = ParseExecutor(a.Get("executor"));
+        var perCodeunit = executor == AlToolExecutor || UsePerCodeunitProtocol(a);
 
+        if (executor == AlToolExecutor && a.Get("protocol")?.Equals("run-all", StringComparison.OrdinalIgnoreCase) == true)
+            throw new BcDevEnvException("--executor altool needs the per-codeunit protocol (PrepareTests selects the tests); remove --protocol run-all.");
         if (catalog != null && !perCodeunit)
             throw new BcDevEnvException(
                 "--disabled-tests needs the per-codeunit protocol (it excludes tests before execution); remove --protocol run-all.");
@@ -175,8 +184,64 @@ public static class RunTestsCommand
         if (!perCodeunit)
             return new Collected(XUnitResultParser.Parse(service.Run(options)), Array.Empty<string>());
 
+        if (executor == AlToolExecutor)
+        {
+            var alToolOptions = BuildAlToolOptions(a, options);
+            Log.Info($"Executor: altool ({alToolOptions.AlToolPath}; development endpoint {alToolOptions.Server}:{alToolOptions.Port}/" +
+                     $"{alToolOptions.ServerInstance}, {alToolOptions.Authentication} authentication). The BcDevEnvTestRunner selects the tests.");
+            var prepared = service.Prepare(options);
+            var alToolRun = alTool.Run(prepared, alToolOptions);
+            return new Collected(alToolRun.Result, alToolRun.RunnerErrors);
+        }
+
+        Log.Info($"Executor: odata ({options.ServiceName} RunCodeunit, one call per codeunit).");
         var perCodeunitRun = service.RunPerCodeunit(options);
         return new Collected(perCodeunitRun.Result, perCodeunitRun.RunnerErrors);
+    }
+
+    public const string ODataExecutor = "odata";
+    public const string AlToolExecutor = "altool";
+
+    /// <summary>--executor: odata (default; the runner's RunCodeunit) or altool (the AL tool's runtests).</summary>
+    public static string ParseExecutor(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return ODataExecutor;
+        var trimmed = value.Trim();
+        if (trimmed.Equals(ODataExecutor, StringComparison.OrdinalIgnoreCase)) return ODataExecutor;
+        if (trimmed.Equals(AlToolExecutor, StringComparison.OrdinalIgnoreCase)) return AlToolExecutor;
+        throw new BcDevEnvException($"Unknown --executor '{value}'. Use odata or altool.");
+    }
+
+    /// <summary>AL tool options from the command line (the connection defaults to the run's server instance).</summary>
+    public static AlToolTestRunner.Options BuildAlToolOptions(ParsedArgs a, NavTestService.RunOptions run)
+    {
+        var alTool = a.Get("altool");
+        if (string.IsNullOrWhiteSpace(alTool))
+            throw new BcDevEnvException("--executor altool needs --altool <path to altool.dll or altool.exe>.");
+        if (!File.Exists(alTool))
+            throw new BcDevEnvException($"The AL tool was not found at '{alTool}'.");
+
+        return new AlToolTestRunner.Options
+        {
+            AlToolPath = alTool,
+            DotnetPath = a.Get("dotnet"),
+            Company = run.Company,
+            Server = a.GetOr("dev-server", "http://localhost"),
+            ServerInstance = a.Get("server-instance") ?? Environment.GetEnvironmentVariable("BCDEVENV_INSTANCE") ?? "BC",
+            Port = ParsePositiveInt(a.Get("dev-port"), "dev-port", 7049),
+            Authentication = run.Authentication,
+            UserName = run.UserName,
+            Password = run.Password,
+            BatchSize = ParsePositiveInt(a.Get("altool-batch-size"), "altool-batch-size", AlToolTestRunner.DefaultBatchSize),
+            Timeout = TimeSpan.FromMinutes(ParsePositiveInt(a.Get("app-timeout-minutes"), "app-timeout-minutes", AlToolTestRunner.DefaultTimeoutMinutes)),
+        };
+    }
+
+    private static int ParsePositiveInt(string? value, string optionName, int defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return defaultValue;
+        if (int.TryParse(value, out var parsed) && parsed > 0) return parsed;
+        throw new BcDevEnvException($"Invalid --{optionName} '{value}'. Expected a positive integer.");
     }
 
     /// <summary>Explicit --protocol wins; otherwise any per-codeunit-only option selects it.</summary>
