@@ -19,7 +19,84 @@ public sealed class NavServerService
         int Client = 7046,
         int Soap = 7047,
         int ODataV4 = 7048,
-        int Developer = 7049);
+        int Developer = 7049,
+        int Reporting = 7084)
+    {
+        /// <summary>REST management API port (ManagementApiServicesPort; the server default is ManagementServicesPort + 41).</summary>
+        public int ManagementApi => Management + 41;
+    }
+
+    /// <summary>
+    /// Ports the NST and its side services bind through HTTP.sys as the service account, each of
+    /// which needs a 'http://+:&lt;port&gt;/' URL reservation: management WCF, client, SOAP, OData,
+    /// developer, the REST management API and the reporting side service
+    /// (Microsoft.BusinessCentral.Reporting.Service.exe, which renders RDLC/Word layouts and saves
+    /// reports as PDF/Excel/Word; without a reservation it dies with HttpSysException 'Access is
+    /// denied' and every report run fails with 'Reporting service is not available').
+    /// </summary>
+    public static IReadOnlyList<int> UrlAclPorts(ServerPorts ports) =>
+        new[] { ports.Management, ports.Client, ports.Soap, ports.ODataV4, ports.Developer, ports.ManagementApi, ports.Reporting }
+            .Where(p => p > 0)
+            .Distinct()
+            .ToArray();
+
+    /// <summary>Default network timeout for a company codeunit run (Invoke-NAVCodeunit).</summary>
+    public static readonly TimeSpan DefaultCodeunitTimeout = TimeSpan.FromMinutes(BuildManifest.DefaultCompanyCodeunitTimeoutMinutes);
+
+    /// <summary>
+    /// Invoke-NAVCodeunit parameters. BC 30's script implementation defaults -NetworkTimeout to
+    /// 600 s, which a full demo-data run (5193 CreateAllDemoData) can exceed on a slow runner, so
+    /// the timeout is always passed. Retries are disabled explicitly: a codeunit run is not
+    /// idempotent, and re-running demo-data generation after a client-side timeout would corrupt
+    /// the company.
+    /// </summary>
+    public static Dictionary<string, object?> InvokeCodeunitParameters(
+        string instance, string companyName, int codeunitId, string? methodName, TimeSpan timeout)
+    {
+        if (timeout <= TimeSpan.Zero)
+            throw new BcDevEnvException($"The codeunit timeout must be positive (got {timeout}).");
+        var parameters = new Dictionary<string, object?>
+        {
+            ["ServerInstance"] = instance,
+            ["CompanyName"] = companyName,
+            ["CodeunitId"] = codeunitId,
+            ["NetworkTimeout"] = timeout,
+            ["MaxRetries"] = 0,
+        };
+        if (!string.IsNullOrWhiteSpace(methodName)) parameters["MethodName"] = methodName;
+        return parameters;
+    }
+
+    /// <summary>
+    /// The database application family for an environment country: the upper-case country code
+    /// (FR, GB, US, ...), or W1 for a blank, 'base' or 'w1' country. The server reads it to decide
+    /// which country-specific feature keys exist (e.g. SalesFR and Payment only for FR,
+    /// VATReverseCharge only for GB), and AL reads it through
+    /// EnvironmentInformation.GetApplicationFamily(). A create-env database has none, which the
+    /// server treats as W1 - so without it a localized app set runs as if it were W1.
+    /// </summary>
+    public static string ApplicationFamilyFor(string? country)
+    {
+        var value = (country ?? string.Empty).Trim();
+        if (value.Length == 0 || value.Equals("base", StringComparison.OrdinalIgnoreCase))
+            return "W1";
+        if (value.Length > 50 || !value.All(char.IsAsciiLetterOrDigit))
+            throw new BcDevEnvException($"Invalid country '{country}': expected a country code such as W1, FR or GB.");
+        return value.ToUpperInvariant();
+    }
+
+    /// <summary>Sets the database application family (Set-NAVApplication) on a running instance.</summary>
+    public void SetApplicationFamily(string instance, string applicationFamily)
+    {
+        Log.Info($"Setting the application family of '{instance}' to '{applicationFamily}'...");
+        _rs.Invoke("Set-NAVApplication", new Dictionary<string, object?>
+        {
+            ["ServerInstance"] = instance,
+            ["ApplicationFamily"] = applicationFamily,
+            ["Force"] = true,
+        });
+        Log.Success($"Application family is '{applicationFamily}'.");
+    }
 
     /// <summary>
     /// Creates a fresh, empty Business Central application database from the platform artifact
@@ -122,6 +199,8 @@ public sealed class NavServerService
             ["SOAPServicesPort"] = ports.Soap.ToString(),
             ["ODataServicesPort"] = ports.ODataV4.ToString(),
             ["DeveloperServicesPort"] = ports.Developer.ToString(),
+            ["ManagementApiServicesPort"] = ports.ManagementApi.ToString(),
+            ["ReportingServicePort"] = ports.Reporting.ToString(),
             ["DeveloperServicesEnabled"] = "true",
             ["ODataServicesEnabled"] = "true",
             ["SOAPServicesEnabled"] = "true",
@@ -161,25 +240,33 @@ public sealed class NavServerService
         // plus the binaries/instance folder it reads config from and writes keys to.
         EnsureServerDataAccess(serviceDir);
 
-        // The server listens via HTTP.sys on its service ports; NETWORK SERVICE cannot bind
-        // 'http://+:<port>/' without a URL reservation (the installer registers these). Without it
-        // the service crashes on start with HttpSysException (5) 'prefix ... is not registered'.
+        // The server and its reporting side service listen via HTTP.sys; NETWORK SERVICE cannot
+        // bind 'http://+:<port>/' without a URL reservation (the installer registers these).
+        // Without it the NST crashes on start with HttpSysException (5) 'prefix ... is not
+        // registered', and the reporting service with 'Access is denied'.
         EnsureUrlAcls(ports);
     }
 
-    /// <summary>Reserves the HTTP.sys URL namespaces the NST binds, for the service account.</summary>
+    /// <summary>Reserves the HTTP.sys URL namespaces the NST and its side services bind, for the service account.</summary>
     private static void EnsureUrlAcls(ServerPorts ports)
     {
         const string account = "NT AUTHORITY\\NETWORK SERVICE";
-        // Management WCF (7045), client (7046), SOAP (7047), OData (7048), dev (7049) and the REST
-        // management API (ManagementServicesPort + 41). Reserve each whole port namespace.
-        var ports2 = new[] { ports.Management, ports.Client, ports.Soap, ports.ODataV4, ports.Developer, ports.Management + 41 };
-        foreach (var port in ports2)
+        var failed = 0;
+        foreach (var port in UrlAclPorts(ports))
         {
-            try { ProcessRunner.Capture("netsh.exe", new[] { "http", "add", "urlacl", $"url=http://+:{port}/", $"user={account}" }); }
-            catch (Exception ex) { Log.Warn($"Could not add urlacl for port {port}: {ex.Message}"); }
+            try
+            {
+                var (code, stdout, stderr) = ProcessRunner.Capture("netsh.exe", new[] { "http", "add", "urlacl", $"url=http://+:{port}/", $"user={account}" });
+                // Error 183 = ERROR_ALREADY_EXISTS (reservation present from an earlier run).
+                if (code != 0 && code != 183 && !(stdout + stderr).Contains("183"))
+                {
+                    failed++;
+                    Log.Warn($"netsh http add urlacl for port {port} failed (exit {code}): {(stdout + stderr).Trim()}");
+                }
+            }
+            catch (Exception ex) { failed++; Log.Warn($"Could not add urlacl for port {port}: {ex.Message}"); }
         }
-        Log.Success("Reserved HTTP.sys URL ACLs for the NST.");
+        if (failed == 0) Log.Success("Reserved HTTP.sys URL ACLs for the NST and its reporting service.");
     }
 
     /// <summary>Creates the server's ProgramData tree and grants the NST service account access.</summary>
@@ -303,18 +390,12 @@ public sealed class NavServerService
     }
 
     /// <summary>Runs a codeunit (or one of its methods) in a company, as Invoke-NAVCodeunit does.</summary>
-    public void InvokeCodeunit(string instance, string companyName, int codeunitId, string? methodName = null)
+    public void InvokeCodeunit(string instance, string companyName, int codeunitId, string? methodName = null, TimeSpan? timeout = null)
     {
         var target = methodName == null ? $"codeunit {codeunitId}" : $"codeunit {codeunitId} ({methodName})";
-        Log.Info($"Running {target} in company '{companyName}'...");
-        var parameters = new Dictionary<string, object?>
-        {
-            ["ServerInstance"] = instance,
-            ["CompanyName"] = companyName,
-            ["CodeunitId"] = codeunitId,
-        };
-        if (!string.IsNullOrWhiteSpace(methodName)) parameters["MethodName"] = methodName;
-        _rs.Invoke("Invoke-NAVCodeunit", parameters);
+        var effectiveTimeout = timeout ?? DefaultCodeunitTimeout;
+        Log.Info($"Running {target} in company '{companyName}' (timeout {effectiveTimeout})...");
+        _rs.Invoke("Invoke-NAVCodeunit", InvokeCodeunitParameters(instance, companyName, codeunitId, methodName, effectiveTimeout));
         Log.Success($"Completed {target}.");
     }
 

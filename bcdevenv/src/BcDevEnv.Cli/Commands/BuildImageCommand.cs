@@ -25,6 +25,8 @@ public static class BuildImageCommand
         var platform = Paths.ReadPlatformInfo();
 
         var country = a.GetOr("country", manifest?.Country ?? platform.Country);
+        // Fail before staging when provisioning could not set the application family.
+        var applicationFamily = NavServerService.ApplicationFamilyFor(country);
         var platformVersion = manifest?.PlatformVersion ?? platform.Version;
         var bak = a.Get("bak") ?? manifest?.Bak
                   ?? throw new BcDevEnvException("No .bak available. Pass --env or --bak.");
@@ -119,13 +121,14 @@ public static class BuildImageCommand
             CompanyName = a.Get("company"),
             EvaluationCompany = a.Flag("evaluation-company"),
             CompanyCodeunits = a.GetAll("company-codeunit").Select(CompanyCodeunitCall.Parse).ToList(),
+            CompanyCodeunitTimeoutMinutes = BuildManifest.ParseCompanyCodeunitTimeout(a.Get("company-codeunit-timeout")),
             ServerSettings = BuildManifest.ParseServerSettings(a.GetAll("server-setting")),
         }.Save(Path.Combine(context, "build-manifest.json"));
 
         if (licenseWarning != null) Log.Warn(licenseWarning);
 
         // 8. docker build.
-        Log.Info($"Building image '{tag}' (base={baseImage})...");
+        Log.Info($"Building image '{tag}' (base={baseImage}, application family {applicationFamily})...");
         var code = Docker.Build(tag, context, dockerfile, new Dictionary<string, string> { ["BASE_IMAGE"] = baseImage });
         if (code != 0) throw new BcDevEnvException($"docker build failed (exit {code}).");
         Log.Success($"Built image '{tag}'.");

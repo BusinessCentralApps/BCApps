@@ -43,7 +43,9 @@ create-env - Create a fresh, EMPTY platform database from the platform artifact
              Application .app packages are just part of that set).
 
   --platform <dir>          Platform artifact folder (or set BCDEVENV_PLATFORM)
-  --country <cc>            Country label for the manifest (default: artifact's)
+  --country <cc>            Country of the environment (default: artifact's); the image
+                            provisioning sets it as the database application family
+                            (upper-cased; blank/base = W1)
   --name <name>             Environment name (default: <country>-<version>)
   --database-name <n>       Database name to create (default: BC; empty platform
                             DB - no Base Application and no Cronus demo data)
@@ -128,6 +130,9 @@ build-image - Stage the .bak + platform Service/WebClient binaries (from the
   --platform <dir>          Platform artifact (default: --env's recorded artifact)
   --env <name>              Environment to bake (reads its manifest)
   --bak <path>              Explicit .bak (overrides --env)
+  --country <cc>            Database application family to provision, e.g. FR or GB
+                            (default: --env's country, else the artifact's; blank/base = W1).
+                            Selects country-specific feature keys and GetApplicationFamily()
   --app-file <path>        Bake-time .app file/folder/glob; repeatable. Installed in the
                             given order (pass dependencies first)
   --app-list <file>         Text file with one .app path per line ('#' comments and blank
@@ -138,6 +143,9 @@ build-image - Stage the .bak + platform Service/WebClient binaries (from the
                             after it is created, e.g. 2 (Company-Initialize) or
                             5193:CreateSetupDemoData; repeatable, run in order, any failure
                             fails the build
+  --company-codeunit-timeout <minutes>  Network timeout for each company codeunit run
+                            (default: 60; BC 30's Invoke-NAVCodeunit defaults to 10 minutes,
+                            which full demo-data generation can exceed). Never retried
   --server-setting <key>=<value>  NST setting applied at provision time (e.g.
                             EnableTaskScheduler=false); repeatable, strict
   --server-instance <name>  NST instance baked into the image (default: BC)

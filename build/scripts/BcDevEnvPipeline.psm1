@@ -1532,8 +1532,48 @@ function Wait-BcDevEnvDockerEngine {
 
 <#
 .SYNOPSIS
+    The larger of the physical sector sizes (atomicity, performance) that fsutil reports for the
+    volume of a path; 0 when it cannot be determined.
+#>
+function Get-BcDevEnvVolumeSectorSize {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    if (-not $root) { return 0 }
+    try { $lines = @(& fsutil fsinfo sectorinfo $root.TrimEnd('\') 2>&1 | ForEach-Object { [string] $_ }) }
+    catch { return 0 }
+    $size = 0
+    foreach ($line in $lines) {
+        if ($line -match '^\s*PhysicalBytesPerSectorFor(?:Atomicity|Performance)\s*:\s*(\d+)') {
+            $size = [Math]::Max($size, [int] $Matches[1])
+        }
+    }
+    return $size
+}
+
+<#
+.SYNOPSIS
+    The data root (registry SQLDataRoot) of a local SQL Server instance; empty when unknown.
+#>
+function Get-BcDevEnvSqlDataRoot {
+    param([string] $Instance = 'SQLEXPRESS')
+
+    $names = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction SilentlyContinue
+    if ($null -eq $names -or $null -eq $names.PSObject.Properties[$Instance]) { return '' }
+    $setup = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$($names.$Instance)\Setup" -ErrorAction SilentlyContinue
+    if ($null -eq $setup -or $null -eq $setup.PSObject.Properties['SQLDataRoot']) { return '' }
+    return [string] $setup.SQLDataRoot
+}
+
+<#
+.SYNOPSIS
     Makes a local SQL Server Express instance available for bcdevenv create-env on a CI runner and
     points BCDEVENV_HOME at a folder the SQL service account can back up to.
+.DESCRIPTION
+    Returns the data home that is used. SQL Server cannot use files on a volume whose physical sector
+    size is above 4 KB; on such a runner Install-SqlExpress.ps1 puts the instance's data files on a
+    4 KB virtual disk, and the data home (where SQL Server writes the empty database's backup) is
+    moved to the same volume, keeping its path below the drive root.
 #>
 function Initialize-BcDevEnvSqlServer {
     param(
@@ -1548,7 +1588,7 @@ function Initialize-BcDevEnvSqlServer {
             throw "SQL Server service '$serviceName' not found and no SQL Server Express install script was given (or '$InstallScript' does not exist)."
         }
         Write-Host "SQL Server service '$serviceName' not found; installing SQL Server Express with '$InstallScript'."
-        & $InstallScript -InstanceName $Instance
+        & $InstallScript -InstanceName $Instance | ForEach-Object { Write-Host $_ }
         if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
             throw "SQL Server Express setup finished but the service '$serviceName' does not exist."
         }
@@ -1585,6 +1625,21 @@ function Initialize-BcDevEnvSqlServer {
     }
     catch {
         Write-Warning "Could not enable the SQL network protocols: $($_.Exception.Message). Shared memory connections may still work."
+    }
+
+    $homeSectorSize = Get-BcDevEnvVolumeSectorSize -Path $DataHome
+    if ($homeSectorSize -gt 4096) {
+        $dataRoot = Get-BcDevEnvSqlDataRoot -Instance $Instance
+        $dataRootSectorSize = if ($dataRoot) { Get-BcDevEnvVolumeSectorSize -Path $dataRoot } else { 0 }
+        if ($dataRootSectorSize -ge 1 -and $dataRootSectorSize -le 4096) {
+            $homeRoot = [System.IO.Path]::GetPathRoot($DataHome)
+            $relocated = [System.IO.Path]::Combine([System.IO.Path]::GetPathRoot($dataRoot), $DataHome.Substring($homeRoot.Length))
+            Write-Host "The volume of '$DataHome' reports a physical sector size of $homeSectorSize bytes; using '$relocated' on the SQL Server data volume ($dataRootSectorSize bytes) instead."
+            $DataHome = $relocated
+        }
+        else {
+            Write-Warning "The volume of '$DataHome' reports a physical sector size of $homeSectorSize bytes, and the SQL Server data root '$dataRoot' is not on a volume with 4096 bytes or less; backing up to it may fail."
+        }
     }
 
     New-Item -ItemType Directory -Path $DataHome -Force | Out-Null

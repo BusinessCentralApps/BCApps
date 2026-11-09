@@ -35,6 +35,27 @@ public sealed class BuildManifest
     /// </summary>
     public List<CompanyCodeunitCall> CompanyCodeunits { get; set; } = new();
 
+    /// <summary>
+    /// Network timeout, in minutes, for each company codeunit run; null = the CLI default
+    /// (<see cref="DefaultCompanyCodeunitTimeoutMinutes"/>).
+    /// </summary>
+    public int? CompanyCodeunitTimeoutMinutes { get; set; }
+
+    public const int DefaultCompanyCodeunitTimeoutMinutes = 60;
+
+    [JsonIgnore]
+    public TimeSpan EffectiveCompanyCodeunitTimeout =>
+        TimeSpan.FromMinutes(CompanyCodeunitTimeoutMinutes ?? DefaultCompanyCodeunitTimeoutMinutes);
+
+    /// <summary>Parses --company-codeunit-timeout &lt;minutes&gt; (null when not given).</summary>
+    public static int? ParseCompanyCodeunitTimeout(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (!int.TryParse(value.Trim(), out var minutes) || minutes <= 0)
+            throw new BcDevEnvException($"Invalid --company-codeunit-timeout '{value}'. Expected a positive number of minutes.");
+        return minutes;
+    }
+
     /// <summary>Server settings applied (strictly) on top of the built-in test-run defaults.</summary>
     public Dictionary<string, string> ServerSettings { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 

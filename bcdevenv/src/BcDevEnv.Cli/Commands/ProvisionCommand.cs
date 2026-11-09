@@ -101,6 +101,10 @@ public static class ProvisionCommand
                 // extension is synchronized (otherwise Sync-NAVApp reports the DB is not synced).
                 server.SyncTenant(manifest.ServerInstance);
 
+                // Localize the database before any app is installed: country-specific feature keys
+                // and EnvironmentInformation.GetApplicationFamily() follow the application family.
+                server.SetApplicationFamily(manifest.ServerInstance, NavServerService.ApplicationFamilyFor(manifest.Country));
+
                 // Install the apps (publish + sync + install) into the database, in manifest order.
                 var appSvc = new NavAppService(rs);
                 var index = 0;
@@ -183,7 +187,7 @@ public static class ProvisionCommand
         }
 
         foreach (var call in manifest.CompanyCodeunits)
-            server.InvokeCodeunit(instance, companyName, call.CodeunitId, call.MethodName);
+            server.InvokeCodeunit(instance, companyName, call.CodeunitId, call.MethodName, manifest.EffectiveCompanyCodeunitTimeout);
     }
 
     /// <summary>Windows account the server instance runs as (see <see cref="NavServerService"/>).</summary>

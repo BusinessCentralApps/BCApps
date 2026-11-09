@@ -1,5 +1,6 @@
 using BcDevEnv.Cli.Commands;
 using BcDevEnv.Cli.Infra;
+using BcDevEnv.Cli.Nav;
 using BcDevEnv.Cli.Testing;
 using Xunit;
 
@@ -171,5 +172,103 @@ public class PipelineSupportTests
         }
         Assert.Contains(@"C:\bcdevenv-setup\Install-SqlExpress.ps1", dockerfile);
         Assert.DoesNotContain("choco ", dockerfile);
+    }
+
+    [Fact]
+    public void Url_reservations_cover_the_reporting_side_service_and_management_api()
+    {
+        var ports = NavServerService.UrlAclPorts(new NavServerService.ServerPorts());
+
+        Assert.Equal(new[] { 7045, 7046, 7047, 7048, 7049, 7086, 7084 }, ports);
+        Assert.Contains(7084, ports);
+        Assert.Equal(ports.Count, ports.Distinct().Count());
+
+        var custom = NavServerService.UrlAclPorts(new NavServerService.ServerPorts(Management: 8045, Developer: 0, Reporting: 8045));
+        Assert.Equal(new[] { 8045, 7046, 7047, 7048, 8086 }, custom);
+    }
+
+    [Fact]
+    public void Codeunit_runs_pass_the_timeout_and_never_retry()
+    {
+        var parameters = NavServerService.InvokeCodeunitParameters("BC", "Test", 5193, "CreateAllDemoData", TimeSpan.FromMinutes(45));
+
+        Assert.Equal("BC", parameters["ServerInstance"]);
+        Assert.Equal("Test", parameters["CompanyName"]);
+        Assert.Equal(5193, parameters["CodeunitId"]);
+        Assert.Equal("CreateAllDemoData", parameters["MethodName"]);
+        Assert.Equal(TimeSpan.FromMinutes(45), parameters["NetworkTimeout"]);
+        Assert.Equal(0, parameters["MaxRetries"]);
+
+        var noMethod = NavServerService.InvokeCodeunitParameters("BC", "Test", 2, " ", TimeSpan.FromMinutes(1));
+        Assert.False(noMethod.ContainsKey("MethodName"));
+
+        Assert.Throws<BcDevEnvException>(() => NavServerService.InvokeCodeunitParameters("BC", "Test", 2, null, TimeSpan.Zero));
+        Assert.Equal(TimeSpan.FromMinutes(60), NavServerService.DefaultCodeunitTimeout);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData(" 30 ", 30)]
+    [InlineData("1", 1)]
+    public void Company_codeunit_timeout_parses_positive_minutes(string? value, int? expected)
+    {
+        Assert.Equal(expected, BuildManifest.ParseCompanyCodeunitTimeout(value));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("1.5")]
+    [InlineData("ten")]
+    public void Company_codeunit_timeout_rejects_invalid_values(string value)
+    {
+        Assert.Throws<BcDevEnvException>(() => BuildManifest.ParseCompanyCodeunitTimeout(value));
+    }
+
+    [Fact]
+    public void Company_codeunit_timeout_defaults_to_an_hour_and_round_trips()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(60), new BuildManifest().EffectiveCompanyCodeunitTimeout);
+
+        var path = Path.Combine(Path.GetTempPath(), "bcdevenv-manifest-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            new BuildManifest { CompanyCodeunitTimeoutMinutes = 90 }.Save(path);
+            var json = File.ReadAllText(path);
+            Assert.Contains("\"companyCodeunitTimeoutMinutes\": 90", json);
+            Assert.DoesNotContain("effectiveCompanyCodeunitTimeout", json, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(TimeSpan.FromMinutes(90), BuildManifest.Load(path).EffectiveCompanyCodeunitTimeout);
+
+            new BuildManifest().Save(path);
+            Assert.DoesNotContain("companyCodeunitTimeoutMinutes", File.ReadAllText(path));
+            Assert.Null(BuildManifest.Load(path).CompanyCodeunitTimeoutMinutes);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, "W1")]
+    [InlineData("", "W1")]
+    [InlineData("base", "W1")]
+    [InlineData("w1", "W1")]
+    [InlineData(" fr ", "FR")]
+    [InlineData("GB", "GB")]
+    [InlineData("US", "US")]
+    public void Application_family_is_the_upper_case_country(string? country, string expected)
+    {
+        Assert.Equal(expected, NavServerService.ApplicationFamilyFor(country));
+    }
+
+    [Theory]
+    [InlineData("fr-FR")]
+    [InlineData("F R")]
+    [InlineData("FR;DROP")]
+    public void Application_family_rejects_non_country_values(string country)
+    {
+        Assert.Throws<BcDevEnvException>(() => NavServerService.ApplicationFamilyFor(country));
     }
 }

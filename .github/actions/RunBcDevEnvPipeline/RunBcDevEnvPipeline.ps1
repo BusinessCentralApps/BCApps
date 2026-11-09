@@ -155,7 +155,12 @@ try {
 
     # --- SQL Server -------------------------------------------------------------------------------
     Write-Section 'SQL Server'
-    Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome -InstallScript (Join-Path $toolRoot 'container/Install-SqlExpress.ps1') | Out-Null
+    # On a runner whose system volume reports a sector size above 4 KB the data home moves to the SQL Server data volume.
+    $sqlDataHome = @(Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome -InstallScript (Join-Path $toolRoot 'container/Install-SqlExpress.ps1'))[-1]
+    if ($sqlDataHome -and $sqlDataHome -ne $dataHome) {
+        $dataHome = $sqlDataHome
+        if ($env:GITHUB_ENV) { Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "BCDEVENV_PIPELINE_HOME=$dataHome" }
+    }
 
     # --- Platform artifact ------------------------------------------------------------------------
     Write-Section 'Platform artifact (build/Packages.json BCPlatform)'

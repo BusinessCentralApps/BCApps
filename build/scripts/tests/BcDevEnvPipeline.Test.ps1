@@ -787,6 +787,8 @@ Describe "Initialize-BcDevEnvSqlServer" {
         Mock -ModuleName BcDevEnvPipeline Restart-Service { }
         Mock -ModuleName BcDevEnvPipeline Get-CimInstance { @() }
         Mock -ModuleName BcDevEnvPipeline Set-Acl { }
+        Mock -ModuleName BcDevEnvPipeline fsutil { @('PhysicalBytesPerSectorForAtomicity :                    4096', 'PhysicalBytesPerSectorForPerformance :                  4096') }
+        Mock -ModuleName BcDevEnvPipeline Get-ItemProperty { }
         $previousHome = $env:BCDEVENV_HOME
     }
 
@@ -795,9 +797,36 @@ Describe "Initialize-BcDevEnvSqlServer" {
     }
 
     It "installs a missing instance with the install script" {
-        Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome (Join-Path $TestDrive 'home') -InstallScript $installScript 6>$null | Out-Null
+        $dataHome = Join-Path $TestDrive 'home'
+        $result = Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome -InstallScript $installScript 6>$null
+        $result | Should -Be $dataHome
+        $env:BCDEVENV_HOME | Should -Be $dataHome
         Get-Content -LiteralPath $script:marker | Should -Be 'SQLEXPRESS'
         Should -Invoke -ModuleName BcDevEnvPipeline Start-Service -ParameterFilter { $Name -eq 'MSSQL$SQLEXPRESS' }
+    }
+
+    It "moves the data home to the SQL Server data volume when its own volume reports a sector size above 4 KB" {
+        Set-Content -LiteralPath $script:marker -Value 'installed'
+        Mock -ModuleName BcDevEnvPipeline fsutil {
+            $size = if ($args[2] -eq 'S:') { 4096 } else { 8192 }
+            @("PhysicalBytesPerSectorForAtomicity :                    $size", "PhysicalBytesPerSectorForPerformance :                  $size", 'FileSystemEffectivePhysicalBytesPerSectorForAtomicity : 4096')
+        }
+        Mock -ModuleName BcDevEnvPipeline Get-ItemProperty { [pscustomobject]@{ SQLEXPRESS = 'MSSQL16.SQLEXPRESS' } } -ParameterFilter { $Path -like '*Instance Names\SQL' }
+        Mock -ModuleName BcDevEnvPipeline Get-ItemProperty { [pscustomobject]@{ SQLDataRoot = 'S:\SQLData\MSSQL16.SQLEXPRESS\MSSQL' } } -ParameterFilter { $Path -like '*\MSSQL16.SQLEXPRESS\Setup' }
+        Mock -ModuleName BcDevEnvPipeline New-Item { } -ParameterFilter { "$Path" -like 'S:\*' }
+        Mock -ModuleName BcDevEnvPipeline Get-Acl { [System.Security.AccessControl.DirectorySecurity]::new() }
+        $result = Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome 'C:\bcdevenv-home\env1' -InstallScript $installScript 6>$null
+        $result | Should -Be 'S:\bcdevenv-home\env1'
+        $env:BCDEVENV_HOME | Should -Be 'S:\bcdevenv-home\env1'
+        Should -Invoke -ModuleName BcDevEnvPipeline New-Item -Times 1 -Exactly -ParameterFilter { "$Path" -eq 'S:\bcdevenv-home\env1' }
+    }
+
+    It "keeps the data home when the SQL Server data root is on the same large-sector volume" {
+        Set-Content -LiteralPath $script:marker -Value 'installed'
+        $dataHome = Join-Path $TestDrive 'home'
+        Mock -ModuleName BcDevEnvPipeline fsutil { @('PhysicalBytesPerSectorForAtomicity :                    8192', 'PhysicalBytesPerSectorForPerformance :                  8192') }
+        $result = Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome $dataHome -InstallScript $installScript 6>$null 3>$null
+        $result | Should -Be $dataHome
     }
 
     It "fails clearly when the instance is missing and there is no install script" {
@@ -806,24 +835,57 @@ Describe "Initialize-BcDevEnvSqlServer" {
     }
 }
 
+Describe "Get-BcDevEnvVolumeSectorSize" {
+    It "returns the larger physical sector size of the path's volume and ignores the file system's effective size" {
+        Mock -ModuleName BcDevEnvPipeline fsutil {
+            @('LogicalBytesPerSector :                                 512',
+              'PhysicalBytesPerSectorForAtomicity :                    4096',
+              'PhysicalBytesPerSectorForPerformance :                  8192',
+              'FileSystemEffectivePhysicalBytesPerSectorForAtomicity : 16384')
+        }
+        Get-BcDevEnvVolumeSectorSize -Path 'D:\a\BCApps' | Should -Be 8192
+        Should -Invoke -ModuleName BcDevEnvPipeline fsutil -Times 1 -Exactly -ParameterFilter { ($args -join ' ') -eq 'fsinfo sectorinfo D:' }
+    }
+
+    It "returns 0 when fsutil does not report the sector size" {
+        Mock -ModuleName BcDevEnvPipeline fsutil { 'Error:  The system cannot find the path specified.' }
+        Get-BcDevEnvVolumeSectorSize -Path 'Q:\missing' | Should -Be 0
+    }
+}
+
 Describe "Install-SqlExpress.ps1" {
     BeforeAll {
         $installSqlExpress = Join-Path $PSScriptRoot '../../../bcdevenv/container/Install-SqlExpress.ps1'
         $installerBytes = [System.Text.Encoding]::ASCII.GetBytes('fake SQLEXPR installer')
         $installerSha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($installerBytes)).Replace('-', '')
+        $systemDrive = [System.IO.Path]::GetPathRoot($env:ProgramFiles).TrimEnd('\')
     }
 
     BeforeEach {
         # The mocks run inside Install-SqlExpress.ps1, whose $script: scope is its own, so the state is a
         # hashtable that the mock bodies find through the dynamic scope chain.
-        $sql = @{ SetupRuns = 0; SucceedsOnRun = 1; RegisteredAfterFailure = $false; Processes = [System.Collections.Generic.List[string]]::new() }
+        $sql = @{ SetupRuns = 0; SucceedsOnRun = 1; RegisteredAfterFailure = $false; Processes = [System.Collections.Generic.List[string]]::new()
+            Sectors = @{ $systemDrive = 4096 }; VirtualDiskWorks = $true; DiskPart = [System.Collections.Generic.List[string]]::new() }
         $workFolder = Join-Path $TestDrive "sql-$([guid]::NewGuid().ToString('N'))"
         Mock Invoke-WebRequest { [System.IO.File]::WriteAllBytes($OutFile, $installerBytes) }
         Mock Start-Sleep { }
         Mock Set-Service { }
         Mock Start-Service { }
-        # Never touch a real SQL Server installation of the machine that runs the tests.
-        Mock Get-ChildItem { } -ParameterFilter { "$Path" -like '*Microsoft SQL Server*' }
+        # Never touch a real SQL Server installation or disk of the machine that runs the tests.
+        Mock Get-ChildItem { } -ParameterFilter { "$Path" -like '*Microsoft SQL Server*' -or "$Path" -like '*SQLData*' }
+        Mock Get-PSDrive { @('C', 'D', 'S') | ForEach-Object { [pscustomobject]@{ Name = $_ } } }
+        Mock fsutil {
+            $size = $sql.Sectors[[string] $args[2]]
+            if ($size) { @("PhysicalBytesPerSectorForAtomicity :                    $size", "PhysicalBytesPerSectorForPerformance :                  $size", 'FileSystemEffectivePhysicalBytesPerSectorForAtomicity : 4096') }
+            else { 'Error:  The system cannot find the path specified.' }
+        }
+        Mock diskpart {
+            $commands = @(Get-Content -LiteralPath $args[1])
+            $sql.DiskPart.Add($commands -join '; ')
+            foreach ($command in $commands) {
+                if ($sql.VirtualDiskWorks -and $command -match '^assign letter=(\w)$') { $sql.Sectors["$($Matches[1]):"] = 4096 }
+            }
+        }
         Mock Get-Service {
             if ($sql.SetupRuns -ge $sql.SucceedsOnRun -and $sql.SetupRuns -gt 0) {
                 $service = [pscustomobject]@{ Name = $Name; Status = 'Running' }
@@ -868,6 +930,35 @@ Describe "Install-SqlExpress.ps1" {
         $sql.Processes.Count | Should -Be 2
         Test-Path -LiteralPath $workFolder | Should -BeFalse
         Should -Invoke Set-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'MSSQLFDLauncher$SQLEXPRESS' -and $StartupType -eq 'Automatic' }
+        $sql.Processes[1] | Should -Not -BeLike '*/INSTALLSQLDATADIR*'
+        Should -Invoke diskpart -Times 0 -Exactly
+    }
+
+    It "puts the data files on a 4 KB virtual disk when the Program Files volume reports a larger sector size" {
+        $sql.Sectors[$systemDrive] = 8192
+        $vhdx = Join-Path $TestDrive 'sqldata.vhdx'
+        & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -VirtualDiskPath $vhdx 6>$null
+        $sql.DiskPart.Count | Should -Be 1
+        $sql.DiskPart[0] | Should -Be "create vdisk file=`"$vhdx`" maximum=131072 type=expandable; select vdisk file=`"$vhdx`"; attach vdisk; create partition primary; format fs=ntfs quick label=`"bcdevenv-sql`"; assign letter=T"
+        $sql.Processes[1] | Should -BeLike '* /ACTION=Install * /INSTALLSQLDATADIR="T:\SQLData"'
+        $sql.SetupRuns | Should -Be 1
+    }
+
+    It "installs with the default data folder when the virtual disk cannot be created" {
+        $sql.Sectors[$systemDrive] = 8192
+        $sql.VirtualDiskWorks = $false
+        $output = & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -VirtualDiskPath (Join-Path $TestDrive 'sqldata.vhdx') 6>&1 | Out-String
+        $output | Should -BeLike '*physical sector size of 8192 bytes*'
+        $output | Should -BeLike '*WARNING: The SQL Server data volume could not be created*'
+        $sql.Processes[1] | Should -BeLike '* /ACTION=Install *'
+        $sql.Processes[1] | Should -Not -BeLike '*/INSTALLSQLDATADIR*'
+    }
+
+    It "uses an explicit data directory without probing the disk" {
+        $sql.Sectors[$systemDrive] = 8192
+        & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -DataDirectory 'E:\SqlData' 6>$null
+        $sql.Processes[1] | Should -BeLike '* /INSTALLSQLDATADIR="E:\SqlData"'
+        Should -Invoke diskpart -Times 0 -Exactly
     }
 
     It "uninstalls a half-installed instance before retrying setup" {

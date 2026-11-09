@@ -22,6 +22,7 @@ public static class VerifyCommand
         "New-NAVApplicationDatabase",
         "New-NAVServerInstance",
         "Set-NAVServerConfiguration",
+        "Set-NAVApplication",
         "Get-NAVAppInfo",
         "Publish-NAVApp",
         "Sync-NAVApp",

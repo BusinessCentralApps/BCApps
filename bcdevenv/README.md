@@ -217,19 +217,32 @@ build mode it:
    Express (`container\Install-SqlExpress.ps1`, also used by the image: Microsoft's
    SHA256-checked Express with Advanced Services download (engine + Full-Text Search)
    instead of the Chocolatey feed, setup retried and verified
-   by the instance service starting), downloads the **platform-only** artifact of the
+   by the instance service starting; on runners whose system disk reports a physical
+   sector size above 4 KB, which SQL Server cannot use, the instance's data files and
+   the environment folder (`BCDEVENV_HOME`) go to an expandable VHDX volume with 4 KB
+   sectors instead, because the `ForcedPhysicalSectorSizeInBytes` registry workaround
+   needs a reboot), downloads the **platform-only** artifact of the
    `BCPlatform` version in `build\Packages.json` (with retries; a truncated or
    invalid zip is deleted and downloaded again) and compiles the test runner app
    with that platform's AL compiler;
 3. `create-env` creates an **empty** platform database (no Cronus/demo data),
-   `build-image` provisions it with all the apps plus the test runner, creates the
+   `build-image` provisions it with all the apps plus the test runner, sets the
+   database's application family to the project's `country` (upper-cased; `w1`/`base`
+   = `W1`), so that country-specific feature keys (e.g. FR `Payment`, GB
+   `VATReverseCharge`) and `EnvironmentInformation.GetApplicationFamily()` match a
+   localized environment, creates the
    company and runs the same company codeunits as
    `build\scripts\ImportTestDataInBcContainer.ps1` (`Company-Initialize` for every
    test type, which upstream's client-session login runs for `UnitTest`; plus the
-   Contoso demo data for `IntegrationTest`/`Uncategorized`), maps the build account
+   Contoso demo data for `IntegrationTest`/`Uncategorized`; each call may take up to
+   60 minutes, `build-image --company-codeunit-timeout <minutes>`, instead of the
+   management API's 600-second default, and is not retried), maps the build account
    and, with Windows authentication, the server's own account (`NT AUTHORITY\NETWORK
    SERVICE`, which the API tests' default-credential calls to the server
-   authenticate as) to SUPER users, and `start` runs the container;
+   authenticate as) to SUPER users, and `start` runs the container (the server's URL
+   reservations include the report rendering side service's port 7084 and the
+   management API port, so the reporting service can start and tests can render
+   reports);
 4. selects the test apps like the project's `.AL-Go\RunTestsInBcContainer.ps1`
    override (the test-type bucket from `build\projects.json`/`build\groups.json` when
    the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
@@ -275,6 +288,12 @@ services endpoint). A web-service session has no client UI, so tests that open
 `NotSupportedException`/"cannot be used in background or server sessions" errors.
 Running them needs a client-session test runner (web server components in the image
 plus `Microsoft.Dynamics.Framework.UI.Client`), which bcdevenv does not provide yet.
+The same applies to tests that expect the data a client login creates: `System
+Initialization` only records the signup context and the user's login information
+for client sessions, so e.g. `User Login Time Tracker Test` and `System
+Initialization Test` fail with "User Login"/"Signup Context Values" records that do
+not exist. Some tests also depend on data that only specific upstream setups create
+(for example the AMC banking license user), and are not seeded generically.
 
 The build jobs of the `CI/CD` and `Pull Request Build` workflows run on `windows-2022`
 (`gitHubRunner` in the `repositories: ["BCApps"]` conditional settings of
@@ -325,7 +344,9 @@ Caveats:
   (Microsoft's `SQLEXPRADV_x64_ENU.exe`, Express with Advanced Services, pinned by
   SHA256, features `SQLENGINE,FULLTEXT`: BC creates full-text indexes when a company
   is created); update its URL and hash together when moving to another SQL Server
-  Express release.
+  Express release. Its sector-size mitigation (a VHDX data volume when the system
+  disk reports physical sectors above 4 KB) needs `diskpart`; where it cannot create
+  the virtual disk (e.g. inside a container) setup uses the default data folder.
 - Registering an NST from baked binaries on a plain Windows base image may need
   manual service setup, since `New-NAVServerInstance` normally expects the
   product installed.
