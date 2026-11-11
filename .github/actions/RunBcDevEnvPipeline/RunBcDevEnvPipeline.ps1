@@ -31,6 +31,7 @@ param(
     [string] $AlToolVersion = '',
     [string] $AppTestTimeoutMinutes = '',
     [string] $TestPermissionsMock = '',
+    [string] $TestStateProbe = '',
     [string] $T2EmbedUrl = ''
 )
 
@@ -94,13 +95,16 @@ Write-Host "Test type:     $(if ($plan.TestType) { $plan.TestType } else { '(non
 Write-Host "Company:       $($plan.CompanyName)$(if ($plan.EvaluationCompany) { ' (evaluation company)' })"
 Write-Host "Company setup: $(if (@($plan.CompanyCodeunits).Count) { $plan.CompanyCodeunits -join ', ' } else { '(empty company)' })"
 foreach ($pass in $plan.Passes) { Write-Host "Test pass:     $($pass.Name), test runner $($pass.RunnerId)" }
-$executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes -PermissionsMock $TestPermissionsMock
+$executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes -PermissionsMock $TestPermissionsMock -StateProbe $TestStateProbe
 $executorLabel = if ($executor.Executor -eq 'altool') { "altool $($executor.AlToolVersion)" } else { 'odata' }
 $permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started without assignments)' } else { 'off (stopped)' }
 if ($plan.Action -eq 'Test') {
     if ($executor.Executor -eq 'altool') {
         Write-Host "Test executor: altool - AL tool $($executor.AlToolVersion) runtests (client session, development endpoint port $devPort), $($executor.AppTimeoutMinutes) min per test app and pass; the BcDevEnvTestRunner selects the tests"
         Write-Host "State reset:   before every test codeunit (BcDevEnv Test Runner); permissions mock $permissionsMockLabel"
+        if ($executor.StateProbe) {
+            Write-Host "State probe:   on (diagnostic) - the BcDevEnv State Probe runs after the first state reset of every AL tool batch; its message is logged as 'State probe: ...' and is not a test result"
+        }
     }
     else {
         Write-Host "Test executor: odata - the BcDevEnvTestRunner OData service selects and runs the tests"
@@ -352,7 +356,7 @@ try {
             $hostResult = Join-Path $resultsFolder $resultName
             $runArguments = Get-BcDevEnvRunTestsArguments -ODataUrl $odataUrl -CompanyName $plan.CompanyName -App $app -Pass $pass -DisabledTestsRoots $containerDisabledRoots -ResultFile $containerResult `
                 -Executor $executor.Executor -AlToolPath $containerAlTool -DotnetPath $containerDotnet -DevPort $devPort -ServerInstance 'BC' -AppTimeoutMinutes $executor.AppTimeoutMinutes `
-                -PermissionsMock $executor.PermissionsMock
+                -PermissionsMock $executor.PermissionsMock -StateProbe $executor.StateProbe
             $exitCode = Invoke-Docker -Arguments (@('exec', '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli) + $runArguments) -AllowFailure -Description "bcdevenv run-tests ($($app.Name))"
             $copyExit = Invoke-Docker -Arguments @('cp', "$($names.ContainerName):$containerResult", $hostResult) -AllowFailure -Description 'Copying the test results'
             if ($copyExit -ne 0 -or -not (Test-Path -LiteralPath $hostResult)) {

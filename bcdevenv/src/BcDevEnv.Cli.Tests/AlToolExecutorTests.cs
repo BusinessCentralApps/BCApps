@@ -13,12 +13,15 @@ namespace BcDevEnv.Cli.Tests;
 
 /// <summary>
 /// Scripted stand-in for AL tool processes; records every call and its test groups file. The responder
-/// gets the test groups without the injected state resets; with <c>autoResets</c> (default) the fake
-/// reports a passed OnRun and the requested ResetTestState&lt;nn&gt; method for every injected reset, like
-/// the AL tool would, and, like the server, fails a test case that repeats a codeunit/method pair of the run.
+/// gets the test groups without the injected state resets and state probe; with <c>autoResets</c> (default)
+/// the fake reports a passed OnRun and the requested ResetTestState&lt;nn&gt; method for every injected reset
+/// (and a failed ProbeState with <see cref="ProbeMessage"/> for an injected probe), like the AL tool would,
+/// and, like the server, fails a test case that repeats a codeunit/method pair of the run.
 /// </summary>
 internal sealed class FakeAlTool
 {
+    public const string ProbeMessage = "BcDevEnv state probe (diagnostic, not a test): ApplicationArea='#Basic,#Suite'; SessionId=51";
+
     private readonly Func<int, IReadOnlyList<AlToolTestRunner.TestGroup>, ProcessCapture> _respond;
     private readonly bool _autoResets;
 
@@ -31,19 +34,22 @@ internal sealed class FakeAlTool
     public List<(string FileName, IReadOnlyList<string> Arguments, TimeSpan Timeout, IReadOnlyDictionary<string, string>? Environment,
         IReadOnlyList<AlToolTestRunner.TestGroup> Groups, string GroupsJson, IReadOnlyList<AlToolTestRunner.TestGroup> AllGroups)> Calls { get; } = new();
 
+    private static bool IsInjected(AlToolTestRunner.TestGroup g) =>
+        AlToolTestRunner.IsStateResetCodeunit(g.CodeunitId) || AlToolTestRunner.IsStateProbeCodeunit(g.CodeunitId);
+
     public ProcessCapture Execute(string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, IReadOnlyDictionary<string, string>? environment)
     {
         var file = arguments[arguments.ToList().IndexOf("--testgroups") + 1];
         var json = File.ReadAllText(file);
         var all = JsonSerializer.Deserialize<List<AlToolTestRunner.TestGroup>>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
-        var groups = all.Where(g => !AlToolTestRunner.IsStateResetCodeunit(g.CodeunitId)).ToList();
+        var groups = all.Where(g => !IsInjected(g)).ToList();
         Calls.Add((fileName, arguments, timeout, environment, groups, json, all));
         var capture = _respond(Calls.Count, groups);
-        return _autoResets ? WithResetResults(capture, all.Where(g => AlToolTestRunner.IsStateResetCodeunit(g.CodeunitId))) : capture;
+        return _autoResets ? WithResetResults(capture, all.Where(IsInjected)) : capture;
     }
 
-    // Adds the reset results in front of the reported results (when there is a result array). An empty method
-    // list runs every reset method; a codeunit/method pair that occurred before fails as on the server.
+    // Adds the reset and probe results in front of the reported results (when there is a result array). An empty
+    // method list runs every reset method; a codeunit/method pair that occurred before fails as on the server.
     private static ProcessCapture WithResetResults(ProcessCapture capture, IEnumerable<AlToolTestRunner.TestGroup> resets)
     {
         var start = capture.StdOut.IndexOf('{');
@@ -57,16 +63,22 @@ internal sealed class FakeAlTool
         var seen = new HashSet<(int, string)>();
         foreach (var reset in resets)
         {
+            var probe = AlToolTestRunner.IsStateProbeCodeunit(reset.CodeunitId);
             var methods = reset.TestMethods.Count > 0
                 ? reset.TestMethods
-                : Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName).ToList();
+                : probe
+                    ? new[] { AlToolTestRunner.StateProbeMethodName }
+                    : Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName).ToList();
             foreach (var method in methods.Prepend("OnRun"))
             {
                 var unique = seen.Add((reset.CodeunitId, method.ToUpperInvariant())) || method == "OnRun";
+                var probed = unique && probe && method != "OnRun";
                 results.Insert(index++, new JsonObject
                 {
-                    ["codeunitId"] = reset.CodeunitId, ["methodName"] = method, ["status"] = unique ? "passed" : "failed",
-                    ["output"] = unique ? "" : $"Test case name '{method}' is not unique. ITestDataSource.ListTestCases() must return a distinct identifier for every test case.",
+                    ["codeunitId"] = reset.CodeunitId, ["methodName"] = method, ["status"] = unique && !probed ? "passed" : "failed",
+                    ["output"] = probed
+                        ? ProbeMessage + "\r\nAL Callstack: \"BcDevEnv State Probe\"(CodeUnit 50105).ProbeState line 40"
+                        : unique ? "" : $"Test case name '{method}' is not unique. ITestDataSource.ListTestCases() must return a distinct identifier for every test case.",
                     ["durationMs"] = 5,
                 });
             }
@@ -423,6 +435,92 @@ public class AlToolExecutorTests
     }
 
     [Fact]
+    public void The_state_probe_runs_once_per_batch_after_the_first_reset_and_is_no_test_result()
+    {
+        const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
+        const int probe = AlToolTestRunner.StateProbeCodeunitId;
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(
+            Prepared(50001, "A", true, Pending("T")),
+            Prepared(50002, "B", true, Pending("T")),
+            Prepared(50003, "C", true, Pending("T")));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: 2) with { StateProbe = true });
+
+        Assert.Empty(run.RunnerErrors);
+        Assert.Equal(new[] { new[] { reset, probe, 50001, reset, 50002 }, new[] { reset, probe, 50003 } },
+            tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
+        Assert.All(tool.Calls, c => Assert.Equal(new[] { AlToolTestRunner.StateProbeMethodName }, c.AllGroups[1].TestMethods));
+        Assert.All(tool.Calls, c => Assert.Empty(FakeAlTool.RepeatedTestCases(c.AllGroups)));
+        Assert.Equal(new[] { 50001, 50002, 50003 }, run.Result.Codeunits.Select(c => c.CodeunitId!.Value));
+        Assert.Equal(3, run.Result.Total);
+        Assert.Equal(3, run.Result.Passed);
+        Assert.Equal(new[]
+            {
+                $"AL tool batch 1/2 (codeunit(s) 50001, 50002): {FakeAlTool.ProbeMessage}",
+                $"AL tool batch 2/2 (codeunit(s) 50003): {FakeAlTool.ProbeMessage}",
+            }, run.StateProbes);
+        Assert.DoesNotContain(run.StateProbes, p => p.Contains("AL Callstack"));
+    }
+
+    [Fact]
+    public void The_state_probe_is_off_by_default_and_a_missing_probe_is_no_infrastructure_error()
+    {
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(Prepared(50001, "A", true, Pending("T")), Prepared(50002, "B", true, Pending("T")));
+
+        var off = new AlToolTestRunner(tool.Execute).Run(suite, Options());
+
+        Assert.Empty(off.RunnerErrors);
+        Assert.Empty(off.StateProbes);
+        Assert.DoesNotContain(Assert.Single(tool.Calls).AllGroups, g => AlToolTestRunner.IsStateProbeCodeunit(g.CodeunitId));
+        Assert.Equal(new[] { AlToolTestRunner.ResetMockStartedCodeunitId, 50001, AlToolTestRunner.ResetMockStartedCodeunitId, 50002 },
+            AlToolTestRunner.WithStateResets(tool.Calls[0].Groups, AlToolTestRunner.ResetMockStartedCodeunitId).Select(g => g.CodeunitId));
+
+        // An old BcDevEnv Test Runner app without the probe: the resets still run, the probe result is just missing.
+        const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
+        var old = new FakeAlTool((_, _) => FakeAlTool.Results(
+            (reset, AlToolTestRunner.ResetMethodName(1), "passed", null),
+            (50001, "T", "passed", null),
+            (reset, AlToolTestRunner.ResetMethodName(2), "passed", null),
+            (50002, "T", "passed", null)), autoResets: false);
+        var missing = new AlToolTestRunner(old.Execute).Run(suite, Options() with { StateProbe = true });
+
+        Assert.Empty(missing.RunnerErrors);
+        Assert.Empty(missing.StateProbes);
+        Assert.Equal(2, missing.Result.Passed);
+    }
+
+    [Fact]
+    public void A_prepared_state_probe_codeunit_is_left_out()
+    {
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(
+            Prepared(AlToolTestRunner.StateProbeCodeunitId, "BcDevEnv State Probe", true, Pending(AlToolTestRunner.StateProbeMethodName)),
+            Prepared(50001, "Alpha", true, Pending("T")));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
+
+        Assert.Empty(run.RunnerErrors);
+        Assert.Equal(new[] { AlToolTestRunner.ResetMockStartedCodeunitId, 50001 }, Assert.Single(tool.Calls).AllGroups.Select(g => g.CodeunitId));
+        Assert.Equal(50001, Assert.Single(run.Result.Codeunits).CodeunitId);
+    }
+
+    [Fact]
+    public void The_state_probe_codeunit_has_one_test_method()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvStateProbe.Codeunit.al"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var source = File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", "BcDevEnvStateProbe.Codeunit.al"));
+
+        Assert.Matches($@"codeunit {AlToolTestRunner.StateProbeCodeunitId} ""BcDevEnv State Probe""", source);
+        Assert.Contains("Subtype = Test;", source);
+        Assert.Equal(new[] { AlToolTestRunner.StateProbeMethodName },
+            Regex.Matches(source, @"\[Test\]\s+procedure (\w+)\(\)").Select(m => m.Groups[1].Value));
+    }
+
+    [Fact]
     public void A_selected_test_without_result_stays_a_not_executed_failure_with_the_onrun_error()
     {
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
@@ -642,6 +740,30 @@ public class AlToolExecutorTests
     }
 
     [Fact]
+    public void Command_with_altool_executor_runs_the_state_probe_only_when_switched_on()
+    {
+        using var dir = new TempDir();
+        var alTool = dir.Write("altool.dll", "");
+        var plan = FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0));
+        var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results((50001, "A", "passed", null)));
+        var probed = Path.Combine(dir.Path, "on.xml");
+
+        Assert.Equal(0, RunCommand(WithPrepare(plan, template), tool, "--executor", "altool", "--altool", alTool,
+            "--state-probe", "ON", "--result-file", probed));
+        Assert.Equal(0, RunCommand(WithPrepare(plan, template), tool, "--executor", "altool", "--altool", alTool,
+            "--result-file", Path.Combine(dir.Path, "default.xml")));
+
+        Assert.Equal(new[] { new[] { AlToolTestRunner.ResetMockStartedCodeunitId, AlToolTestRunner.StateProbeCodeunitId, 50001 },
+                             new[] { AlToolTestRunner.ResetMockStartedCodeunitId, 50001 } },
+            tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
+        var junit = XDocument.Load(probed);
+        Assert.Single(junit.Descendants("testcase"));
+        Assert.Empty(junit.Descendants("failure"));
+        Assert.DoesNotContain(AlToolTestRunner.StateProbeMethodName, junit.ToString());
+    }
+
+    [Fact]
     public void Command_with_altool_executor_fails_on_a_failed_state_reset_even_with_allow_failures()
     {
         using var dir = new TempDir();
@@ -705,6 +827,7 @@ public class AlToolExecutorTests
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--protocol", "run-all"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--dev-port", "0"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--permissions-mock", "yes"));
+        Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--state-probe", "yes"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--altool-batch-size", "51"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "vstest"));
         Assert.Equal(AlToolTestRunner.MaxBatchSize, RunTestsCommand.ParseBatchSize("50"));
@@ -734,6 +857,7 @@ public class AlToolExecutorTests
         Assert.Equal(5, options.BatchSize);
         Assert.Equal(TimeSpan.FromMinutes(30), options.Timeout);
         Assert.True(options.PermissionsMock);
+        Assert.False(options.StateProbe);
     }
 
     private static int RunCommand(FakeRunnerHandler handler, FakeAlTool tool, params string[] args)

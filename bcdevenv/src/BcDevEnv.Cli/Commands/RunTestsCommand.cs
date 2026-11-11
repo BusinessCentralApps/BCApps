@@ -235,7 +235,18 @@ public static class RunTestsCommand
             BatchSize = ParseBatchSize(a.Get("altool-batch-size")),
             Timeout = TimeSpan.FromMinutes(ParsePositiveInt(a.Get("app-timeout-minutes"), "app-timeout-minutes", AlToolTestRunner.DefaultTimeoutMinutes)),
             PermissionsMock = ParsePermissionsMock(a.Get("permissions-mock")),
+            StateProbe = ParseStateProbe(a.Get("state-probe")),
         };
+    }
+
+    /// <summary>--state-probe: off (default) or on (diagnostic: log the session state after the first reset of every batch).</summary>
+    public static bool ParseStateProbe(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var trimmed = value.Trim();
+        if (trimmed.Equals("on", StringComparison.OrdinalIgnoreCase)) return true;
+        if (trimmed.Equals("off", StringComparison.OrdinalIgnoreCase)) return false;
+        throw new BcDevEnvException($"Invalid --state-probe '{value}'. Use on or off.");
     }
 
     /// <summary>--permissions-mock: on (default; started without assignments before every codeunit) or off (stopped).</summary>

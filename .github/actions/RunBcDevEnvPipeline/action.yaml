@@ -78,6 +78,14 @@ inputs:
       Empty uses the AL-Go setting bcdevenvTestPermissionsMock, else on.
     required: false
     default: ''
+  testStateProbe:
+    description: >-
+      altool executor, diagnostic: on runs the BcDevEnv State Probe test codeunit once per AL tool batch,
+      right after the first state reset, and logs its message ("State probe: ..." - ApplicationArea, session,
+      Application Area Setup, TestPage control visibility, permissions mock, work date). It always fails and
+      is not a test result. Empty uses the AL-Go setting bcdevenvTestStateProbe, else off.
+    required: false
+    default: ''
   t2embedUrl:
     description: >-
       URL of t2embed.dll (font embedding, needed to render reports as PDF; Windows Server Core lacks it),
@@ -107,6 +115,7 @@ runs:
         _alToolVersion: ${{ inputs.alToolVersion }}
         _appTestTimeoutMinutes: ${{ inputs.appTestTimeoutMinutes }}
         _testPermissionsMock: ${{ inputs.testPermissionsMock }}
+        _testStateProbe: ${{ inputs.testStateProbe }}
         _t2embedUrl: ${{ inputs.t2embedUrl }}
         DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         DOTNET_NOLOGO: '1'
@@ -126,6 +135,7 @@ runs:
           AlToolVersion         = $env:_alToolVersion
           AppTestTimeoutMinutes = $env:_appTestTimeoutMinutes
           TestPermissionsMock   = $env:_testPermissionsMock
+          TestStateProbe        = $env:_testStateProbe
           T2EmbedUrl            = $env:_t2embedUrl
         }
         try {

@@ -419,6 +419,17 @@ Describe "Get-BcDevEnvRunTestsArguments" {
         $odata | Should -Not -Contain '--permissions-mock'
     }
 
+    It "passes --state-probe on to the altool executor only when the probe is switched on" {
+        $app = [pscustomobject]@{ Id = 'i'; Name = 'n' }
+        $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
+        $on = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' -AlToolPath 'a.dll' -StateProbe $true
+        ($on -join ' ') | Should -BeLike '* --permissions-mock on --state-probe on'
+        $off = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' -AlToolPath 'a.dll'
+        $off | Should -Not -Contain '--state-probe'
+        $odata = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'odata' -StateProbe $true
+        $odata | Should -Not -Contain '--state-probe'
+    }
+
     It "requires the AL tool path for the altool executor and rejects unknown executors" {
         $app = [pscustomobject]@{ Id = 'i'; Name = 'n' }
         $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
@@ -434,6 +445,16 @@ Describe "Get-BcDevEnvTestExecutorSettings" {
         $executor.AlToolVersion | Should -Be '30.0.44.47290-beta'
         $executor.AppTimeoutMinutes | Should -Be 240
         $executor.PermissionsMock | Should -BeTrue
+        $executor.StateProbe | Should -BeFalse
+    }
+
+    It "reads bcdevenvTestStateProbe (boolean or on/off) and lets a non-empty input override it" {
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = $true })).StateProbe | Should -BeTrue
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = 'ON' })).StateProbe | Should -BeTrue
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = $false })).StateProbe | Should -BeFalse
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = $true }) -StateProbe ' off ').StateProbe | Should -BeFalse
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = $false }) -StateProbe 'true').StateProbe | Should -BeTrue
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestStateProbe = $true }) -StateProbe '').StateProbe | Should -BeTrue
     }
 
     It "reads bcdevenvTestPermissionsMock (boolean or on/off) and lets a non-empty input override it" {
@@ -465,6 +486,7 @@ Describe "Get-BcDevEnvTestExecutorSettings" {
         @{ Case = 'a zero timeout'; Arguments = @{ AppTimeoutMinutes = '0' }; Message = "*Invalid test timeout '0'*" }
         @{ Case = 'a non-numeric timeout'; Arguments = @{ AppTimeoutMinutes = 'abc' }; Message = "*Invalid test timeout 'abc'*" }
         @{ Case = 'an invalid permissions mock switch'; Arguments = @{ PermissionsMock = 'yes' }; Message = "*Invalid permissions mock setting 'yes'*" }
+        @{ Case = 'an invalid state probe switch'; Arguments = @{ StateProbe = 'maybe' }; Message = "*Invalid state probe setting 'maybe'*" }
     ) {
         param($Case, $Arguments, $Message)
         { Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings) @Arguments } | Should -Throw $Message
@@ -564,6 +586,7 @@ Describe "RunBcDevEnvPipeline action contract" {
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AlToolVersion'
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AppTestTimeoutMinutes'
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'TestPermissionsMock'
+        @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'TestStateProbe'
         foreach ($entry in $mapped) {
             $parameters | Should -Contain $entry.Parameter
             $action | Should -Match ('(?m)^  {0}:\s*$' -f [regex]::Escape($entry.Env))

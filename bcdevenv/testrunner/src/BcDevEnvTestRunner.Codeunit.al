@@ -211,14 +211,15 @@ codeunit 50100 "BcDevEnv Test Runner"
         TestSuiteMgt.GetTestMethods(ALTestSuite, CodeunitMetadata);
     end;
 
-    // The state reset codeunits of this app are injected by 'bcdevenv run-tests --executor altool'
-    // before every test codeunit; they are never selected as tests (only matters without an extension filter).
+    // The state reset codeunits (and the diagnostic state probe) of this app are injected by 'bcdevenv run-tests
+    // --executor altool'; they are never selected as tests (only matters without an extension filter).
     local procedure ExcludeStateResetCodeunits(SuiteName: Code[10])
     var
         TestMethodLine: Record "Test Method Line";
     begin
         TestMethodLine.SetRange("Test Suite", SuiteName);
-        TestMethodLine.SetFilter("Test Codeunit", '%1|%2', Codeunit::"BcDevEnv Reset Mock Started", Codeunit::"BcDevEnv Reset Mock Stopped");
+        TestMethodLine.SetFilter("Test Codeunit", '%1|%2|%3', Codeunit::"BcDevEnv Reset Mock Started", Codeunit::"BcDevEnv Reset Mock Stopped",
+            Codeunit::"BcDevEnv State Probe");
         TestMethodLine.DeleteAll();
     end;
 

@@ -239,6 +239,27 @@ sent (for example an outdated runner app), is an infrastructure error that fails
 command even with `--allow-failures`. See [Known differences](#bcapps-ci-pipeline) for
 what the reset does not cover.
 
+**State probe (`altool`, diagnostic, off by default).** With `--state-probe on`, the
+AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, right after
+the first state reset (`[{R,[ResetTestState01]}, {50105,[ProbeState]}, c1,
+{R,[ResetTestState02]}, c2, …]`), so it sees the session state the batch's first test
+codeunit starts with. Its only test method always fails with one diagnostic line,
+which the CLI logs as `State probe: <batch>: …`: `ApplicationArea()`, the session id,
+client type and `GuiAllowed`, the company, user and work date, the permissions mock
+state (when compiled with it), the rows of table 9178 `Application Area Setup` (read
+through `RecordRef`, so the runner does not depend on the Base Application), and
+whether a `TestPage` of page 50105 `BcDevEnv State Probe` finds a field and an action
+with `ApplicationArea = Basic, Suite` and with `All` — with the current application
+area and again after `ApplicationArea('')` inside the probe (the probe restores the
+area afterwards). The probe is not a test: it is not counted, not written to the JUnit
+report, not matched against DisabledTests, and a missing probe result (an older runner
+app) is only a warning. Switch it with the action input `testStateProbe` or the AL-Go
+setting `bcdevenvTestStateProbe` (`true`/`on`, or `false`/`off`, the default). The
+repository's `.github/AL-Go-Settings.json` sets it to `true` **temporarily**, to find
+out why `TestPage` controls with `ApplicationArea = Basic, Suite` are "not found on
+the page" although the reset sets `ApplicationArea('')`; turn it off again once that
+is understood.
+
 ### DisabledTests
 
 `--disabled-tests <root>` (repeatable) together with `--app-name <name>` reads
@@ -327,11 +348,12 @@ build mode it:
    the permissions mock part is on by default).
    Override them with the action inputs `testExecutor` (`altool`/`odata`; `odata`
    is the previous web-service executor, kept as a fallback), `alToolVersion`,
-   `appTestTimeoutMinutes` and `testPermissionsMock` (`on`/`off`), or the AL-Go
-   settings `bcdevenvTestExecutor`, `bcdevenvAlToolVersion`,
-   `bcdevenvAppTestTimeoutMinutes` and `bcdevenvTestPermissionsMock` (`true`/`false`).
+   `appTestTimeoutMinutes`, `testPermissionsMock` (`on`/`off`) and `testStateProbe`
+   (`on`/`off`, diagnostic), or the AL-Go settings `bcdevenvTestExecutor`,
+   `bcdevenvAlToolVersion`, `bcdevenvAppTestTimeoutMinutes`,
+   `bcdevenvTestPermissionsMock` and `bcdevenvTestStateProbe` (`true`/`false`).
    The log names the executor of every app and pass (`Tests: <app> - <pass> (executor
-   altool <version>)`) and the permissions mock setting;
+   altool <version>)`), the permissions mock setting and, when on, the state probe;
 5. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
    `AnalyzeTests`) and `<project>\.buildartifacts\TestResults.xml` (uploaded test
    results artifact); the log is written to `<project>\BuildOutput.txt`, and on

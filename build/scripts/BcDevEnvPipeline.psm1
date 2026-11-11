@@ -1371,12 +1371,14 @@ exit 1
 <#
 .SYNOPSIS
     Resolves the test executor: action inputs win over the AL-Go settings bcdevenvTestExecutor,
-    bcdevenvAlToolVersion, bcdevenvAppTestTimeoutMinutes and bcdevenvTestPermissionsMock, which win over
-    the defaults (altool, the pinned AL tool version, 240 minutes per test app and pass, permissions
-    mock on).
+    bcdevenvAlToolVersion, bcdevenvAppTestTimeoutMinutes, bcdevenvTestPermissionsMock and
+    bcdevenvTestStateProbe, which win over the defaults (altool, the pinned AL tool version, 240 minutes
+    per test app and pass, permissions mock on, state probe off).
 .DESCRIPTION
     PermissionsMock (altool executor only): the state reset that runs before every test codeunit starts
     the permissions mock without assignments (true / on) or stops it (false / off).
+    StateProbe (altool executor only, diagnostic): true / on runs the BcDevEnv State Probe after the
+    first state reset of every AL tool batch and logs its message; false / off (default) does not.
 #>
 function Get-BcDevEnvTestExecutorSettings {
     param(
@@ -1384,7 +1386,8 @@ function Get-BcDevEnvTestExecutorSettings {
         [AllowEmptyString()] [string] $Executor = '',
         [AllowEmptyString()] [string] $AlToolVersion = '',
         [AllowEmptyString()] [string] $AppTimeoutMinutes = '',
-        [AllowEmptyString()] [string] $PermissionsMock = ''
+        [AllowEmptyString()] [string] $PermissionsMock = '',
+        [AllowEmptyString()] [string] $StateProbe = ''
     )
 
     if ([string]::IsNullOrWhiteSpace($Executor)) { $Executor = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvTestExecutor' -Default '') }
@@ -1423,11 +1426,24 @@ function Get-BcDevEnvTestExecutorSettings {
         else { throw "Invalid permissions mock setting '$PermissionsMock' (bcdevenvTestPermissionsMock). Use true / on or false / off." }
     }
 
+    if ([string]::IsNullOrWhiteSpace($StateProbe)) {
+        $setting = Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvTestStateProbe' -Default $null
+        if ($null -ne $setting) { $StateProbe = [string]$setting }
+    }
+    $probe = $false
+    if (-not [string]::IsNullOrWhiteSpace($StateProbe)) {
+        $normalized = $StateProbe.Trim().ToLowerInvariant()
+        if (@('true', 'on') -contains $normalized) { $probe = $true }
+        elseif (@('false', 'off') -contains $normalized) { $probe = $false }
+        else { throw "Invalid state probe setting '$StateProbe' (bcdevenvTestStateProbe). Use true / on or false / off." }
+    }
+
     return [pscustomobject]@{
         Executor          = $Executor
         AlToolVersion     = $AlToolVersion
         AppTimeoutMinutes = $timeout
         PermissionsMock   = $mock
+        StateProbe        = $probe
     }
 }
 
@@ -1511,7 +1527,8 @@ exit 1
     With -Executor altool the BcDevEnvTestRunner still selects the tests (test type, isolation pass,
     DisabledTests) and the AL tool (-AlToolPath, run with -DotnetPath) executes them through the
     development endpoint on -DevPort, within -AppTimeoutMinutes for the app and pass. -PermissionsMock
-    selects the state reset before every test codeunit (permissions mock started or stopped).
+    selects the state reset before every test codeunit (permissions mock started or stopped);
+    -StateProbe adds the diagnostic --state-probe on (left out when off, the CLI default).
 #>
 function Get-BcDevEnvRunTestsArguments {
     param(
@@ -1529,7 +1546,8 @@ function Get-BcDevEnvRunTestsArguments {
         [int] $DevPort = 7049,
         [string] $ServerInstance = 'BC',
         [int] $AppTimeoutMinutes = 240,
-        [bool] $PermissionsMock = $true
+        [bool] $PermissionsMock = $true,
+        [bool] $StateProbe = $false
     )
 
     $arguments = @(
@@ -1562,6 +1580,7 @@ function Get-BcDevEnvRunTestsArguments {
             '--app-timeout-minutes', [string]$AppTimeoutMinutes,
             '--permissions-mock', $(if ($PermissionsMock) { 'on' } else { 'off' })
         )
+        if ($StateProbe) { $arguments += @('--state-probe', 'on') }
     }
     return $arguments
 }
