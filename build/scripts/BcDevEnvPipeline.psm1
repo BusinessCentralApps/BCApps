@@ -40,6 +40,10 @@ $script:DefaultTestExecutor = 'altool'
 $script:AlToolPackageId = 'microsoft.dynamics.businesscentral.development.tools'
 $script:DefaultAlToolVersion = '30.0.44.47290-beta'
 $script:DefaultAppTestTimeoutMinutes = 240
+# Permissions Mock (src/Tools/Test Framework/Test Libraries/Permissions Mock). When it is installed, the
+# BcDevEnv Test Runner is compiled against it so its state reset can start and stop the mock.
+$script:PermissionsMockAppId = '40860557-a18d-42ad-aecb-22b7dd80dc80'
+$script:PermissionsMockSymbol = 'BCDEVENV_PERMISSIONSMOCK'
 # Source of t2embed.dll (font embedding, needed to render reports as PDF), which Windows Server Core
 # lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
 # $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
@@ -1367,15 +1371,20 @@ exit 1
 <#
 .SYNOPSIS
     Resolves the test executor: action inputs win over the AL-Go settings bcdevenvTestExecutor,
-    bcdevenvAlToolVersion and bcdevenvAppTestTimeoutMinutes, which win over the defaults (altool,
-    the pinned AL tool version, 240 minutes per test app and pass).
+    bcdevenvAlToolVersion, bcdevenvAppTestTimeoutMinutes and bcdevenvTestPermissionsMock, which win over
+    the defaults (altool, the pinned AL tool version, 240 minutes per test app and pass, permissions
+    mock on).
+.DESCRIPTION
+    PermissionsMock (altool executor only): the state reset that runs before every test codeunit starts
+    the permissions mock without assignments (true / on) or stops it (false / off).
 #>
 function Get-BcDevEnvTestExecutorSettings {
     param(
         [AllowNull()] $Settings,
         [AllowEmptyString()] [string] $Executor = '',
         [AllowEmptyString()] [string] $AlToolVersion = '',
-        [AllowEmptyString()] [string] $AppTimeoutMinutes = ''
+        [AllowEmptyString()] [string] $AppTimeoutMinutes = '',
+        [AllowEmptyString()] [string] $PermissionsMock = ''
     )
 
     if ([string]::IsNullOrWhiteSpace($Executor)) { $Executor = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvTestExecutor' -Default '') }
@@ -1402,10 +1411,23 @@ function Get-BcDevEnvTestExecutorSettings {
         $timeout = $parsed
     }
 
+    if ([string]::IsNullOrWhiteSpace($PermissionsMock)) {
+        $setting = Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvTestPermissionsMock' -Default $null
+        if ($null -ne $setting) { $PermissionsMock = [string]$setting }
+    }
+    $mock = $true
+    if (-not [string]::IsNullOrWhiteSpace($PermissionsMock)) {
+        $normalized = $PermissionsMock.Trim().ToLowerInvariant()
+        if (@('true', 'on') -contains $normalized) { $mock = $true }
+        elseif (@('false', 'off') -contains $normalized) { $mock = $false }
+        else { throw "Invalid permissions mock setting '$PermissionsMock' (bcdevenvTestPermissionsMock). Use true / on or false / off." }
+    }
+
     return [pscustomobject]@{
         Executor          = $Executor
         AlToolVersion     = $AlToolVersion
         AppTimeoutMinutes = $timeout
+        PermissionsMock   = $mock
     }
 }
 
@@ -1488,7 +1510,8 @@ exit 1
 .DESCRIPTION
     With -Executor altool the BcDevEnvTestRunner still selects the tests (test type, isolation pass,
     DisabledTests) and the AL tool (-AlToolPath, run with -DotnetPath) executes them through the
-    development endpoint on -DevPort, within -AppTimeoutMinutes for the app and pass.
+    development endpoint on -DevPort, within -AppTimeoutMinutes for the app and pass. -PermissionsMock
+    selects the state reset before every test codeunit (permissions mock started or stopped).
 #>
 function Get-BcDevEnvRunTestsArguments {
     param(
@@ -1505,7 +1528,8 @@ function Get-BcDevEnvRunTestsArguments {
         [string] $DotnetPath = '',
         [int] $DevPort = 7049,
         [string] $ServerInstance = 'BC',
-        [int] $AppTimeoutMinutes = 240
+        [int] $AppTimeoutMinutes = 240,
+        [bool] $PermissionsMock = $true
     )
 
     $arguments = @(
@@ -1535,10 +1559,49 @@ function Get-BcDevEnvRunTestsArguments {
         $arguments += @(
             '--dev-port', [string]$DevPort,
             '--server-instance', $ServerInstance,
-            '--app-timeout-minutes', [string]$AppTimeoutMinutes
+            '--app-timeout-minutes', [string]$AppTimeoutMinutes,
+            '--permissions-mock', $(if ($PermissionsMock) { 'on' } else { 'off' })
         )
     }
     return $arguments
+}
+
+<#
+.SYNOPSIS
+    When Permissions Mock is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy of the
+    BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
+    BCDEVENV_PERMISSIONSMOCK, which enables the permissions mock part of the runner's state reset.
+    Returns the Permissions Mock app, or $null (app.json unchanged) when it is not installed. Idempotent.
+#>
+function Set-BcDevEnvRunnerPermissionsMock {
+    param(
+        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [AllowEmptyCollection()] [object[]] $Apps = @()
+    )
+
+    $mockApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:PermissionsMockAppId }) | Select-Object -First 1
+    if ($null -eq $mockApp) { return $null }
+
+    $json = Get-Content -LiteralPath $AppJsonPath -Raw | ConvertFrom-Json
+    $dependencies = @()
+    if ($json.PSObject.Properties['dependencies'] -and $null -ne $json.dependencies) {
+        $dependencies = @($json.dependencies | Where-Object { [string]$_.id -ne $script:PermissionsMockAppId })
+    }
+    $dependencies += [pscustomobject]@{
+        id        = $script:PermissionsMockAppId
+        name      = [string]$mockApp.Name
+        publisher = [string]$mockApp.Publisher
+        version   = [string]$mockApp.Version
+    }
+    $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue $dependencies -Force
+
+    $symbols = @()
+    if ($json.PSObject.Properties['preprocessorSymbols'] -and $null -ne $json.preprocessorSymbols) { $symbols = @($json.preprocessorSymbols) }
+    if ($symbols -notcontains $script:PermissionsMockSymbol) { $symbols += $script:PermissionsMockSymbol }
+    $json | Add-Member -NotePropertyName 'preprocessorSymbols' -NotePropertyValue $symbols -Force
+
+    Set-Content -LiteralPath $AppJsonPath -Value ($json | ConvertTo-Json -Depth 10) -Encoding UTF8
+    return $mockApp
 }
 
 function Get-BcDevEnvJUnitCounts {

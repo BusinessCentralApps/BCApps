@@ -70,6 +70,14 @@ inputs:
       bcdevenvAppTestTimeoutMinutes, else 240.
     required: false
     default: ''
+  testPermissionsMock:
+    description: >-
+      altool executor: the state of the permissions mock (Permissions Mock, codeunit 131006) set by the
+      state reset that runs before every test codeunit. on starts it without assignments (as the Test
+      Runner does before every test method), off stops it. Only applies when Permissions Mock is installed.
+      Empty uses the AL-Go setting bcdevenvTestPermissionsMock, else on.
+    required: false
+    default: ''
   t2embedUrl:
     description: >-
       URL of t2embed.dll (font embedding, needed to render reports as PDF; Windows Server Core lacks it),
@@ -98,6 +106,7 @@ runs:
         _testExecutor: ${{ inputs.testExecutor }}
         _alToolVersion: ${{ inputs.alToolVersion }}
         _appTestTimeoutMinutes: ${{ inputs.appTestTimeoutMinutes }}
+        _testPermissionsMock: ${{ inputs.testPermissionsMock }}
         _t2embedUrl: ${{ inputs.t2embedUrl }}
         DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         DOTNET_NOLOGO: '1'
@@ -116,6 +125,7 @@ runs:
           TestExecutor          = $env:_testExecutor
           AlToolVersion         = $env:_alToolVersion
           AppTestTimeoutMinutes = $env:_appTestTimeoutMinutes
+          TestPermissionsMock   = $env:_testPermissionsMock
           T2EmbedUrl            = $env:_t2embedUrl
         }
         try {

@@ -3,7 +3,7 @@
   "name": "BcDevEnv Test Runner",
   "publisher": "BcDevEnv",
   "brief": "OData test-runner endpoint for bcdevenv run-tests.",
-  "description": "Exposes a 'BcDevEnvTestRunner' web service for 'bcdevenv run-tests'. RunAll runs the installed test codeunits via the Microsoft test framework toolkit; the per-codeunit protocol (PrepareTests, RunCodeunit, GetCodeunitResults) prepares a suite for one extension/test type/isolation, excludes the DisabledTests entries before execution and runs one codeunit per call. Results are returned as xUnit XML, which 'bcdevenv run-tests' converts to JUnit.",
+  "description": "Exposes a 'BcDevEnvTestRunner' web service for 'bcdevenv run-tests'. RunAll runs the installed test codeunits via the Microsoft test framework toolkit; the per-codeunit protocol (PrepareTests, RunCodeunit, GetCodeunitResults) prepares a suite for one extension/test type/isolation, excludes the DisabledTests entries before execution and runs one codeunit per call. Results are returned as xUnit XML, which 'bcdevenv run-tests' converts to JUnit. With the altool executor, the 'BcDevEnv Reset ...' test codeunits run before every test codeunit to reset the test state (ApplicationArea, WorkDate, test initialization, permissions mock).",
   "version": "30.0.0.0",
   "dependencies": [
     {

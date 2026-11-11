@@ -22,6 +22,11 @@ namespace BcDevEnv.Cli.Testing;
 /// <para>Codeunits are run in batches (one AL tool process per batch) under a per-app deadline. A
 /// process that cannot start, times out, or does not print a parseable JSON result with data is an
 /// infrastructure error; failed tests alone are not (the AL tool exits 1 for them).</para>
+///
+/// <para>The server's development test runner raises none of the Test Runner's per-test events, so a
+/// state reset codeunit of the BcDevEnv Test Runner app (<see cref="ResetMockStartedCodeunitId"/> or
+/// <see cref="ResetMockStoppedCodeunitId"/>) is run before every test codeunit of every batch. Its
+/// results are not test results; a reset that fails or is not reported is an infrastructure error.</para>
 /// </summary>
 public sealed class AlToolTestRunner
 {
@@ -58,6 +63,12 @@ public sealed class AlToolTestRunner
 
         /// <summary>Folder for the test group files; null = a temporary folder.</summary>
         public string? WorkDirectory { get; init; }
+
+        /// <summary>
+        /// The state reset before every test codeunit starts the permissions mock without assignments
+        /// (true, <see cref="ResetMockStartedCodeunitId"/>) or stops it (false, <see cref="ResetMockStoppedCodeunitId"/>).
+        /// </summary>
+        public bool PermissionsMock { get; init; } = true;
     }
 
     /// <summary>Merged results (every prepared codeunit, in plan order) and infrastructure errors.</summary>
@@ -68,6 +79,16 @@ public sealed class AlToolTestRunner
 
     public const int DefaultBatchSize = 20;
     public const int DefaultTimeoutMinutes = 240;
+
+    /// <summary>BcDevEnv Test Runner codeunit "BcDevEnv Reset Mock Started" (state reset, permissions mock started).</summary>
+    public const int ResetMockStartedCodeunitId = 50103;
+
+    /// <summary>BcDevEnv Test Runner codeunit "BcDevEnv Reset Mock Stopped" (state reset, permissions mock stopped).</summary>
+    public const int ResetMockStoppedCodeunitId = 50104;
+
+    /// <summary>The test method of the state reset codeunits.</summary>
+    public const string ResetMethodName = "ResetTestState";
+
     private const string CallstackMarker = "AL Callstack:";
 
     private static readonly JsonSerializerOptions GroupJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -92,7 +113,10 @@ public sealed class AlToolTestRunner
     public AlToolRun Run(NavTestService.PreparedSuite suite, Options options)
     {
         var errors = new List<string>(suite.RunnerErrors);
-        var states = suite.Codeunits.Select(c => new CodeunitState(c)).ToList();
+        var resetId = StateResetCodeunitId(options.PermissionsMock);
+        foreach (var reset in suite.Codeunits.Where(c => IsStateResetCodeunit(c.Codeunit.CodeunitId)))
+            Log.Warn($"Codeunit {reset.Codeunit.CodeunitId} {reset.Codeunit.Name} is a BcDevEnv state reset codeunit, not a test; it is left out.");
+        var states = suite.Codeunits.Where(c => !IsStateResetCodeunit(c.Codeunit.CodeunitId)).Select(c => new CodeunitState(c)).ToList();
         var runnable = states.Where(s => s.Prepared.TemplateAvailable && s.Prepared.Codeunit.Run && s.Group != null).ToList();
         var batchSize = Math.Max(1, options.BatchSize);
         var batches = runnable.Select((s, i) => (s, i)).GroupBy(x => x.i / batchSize, x => x.s).Select(g => g.ToList()).ToList();
@@ -100,6 +124,8 @@ public sealed class AlToolTestRunner
 
         Log.Info($"AL tool: {runnable.Count} codeunit(s) to run in {batches.Count} batch(es) of up to {batchSize} " +
                  $"(timeout {options.Timeout.TotalMinutes:0} min); {states.Count - runnable.Count} codeunit(s) not run (fully disabled or not prepared).");
+        Log.Info($"AL tool: state reset codeunit {resetId} runs before every test codeunit " +
+                 $"(permissions mock {(options.PermissionsMock ? "started without assignments" : "stopped")}); its results are not reported.");
 
         var workDirectory = options.WorkDirectory ?? Path.Combine(Path.GetTempPath(), "bcdevenv-altool-" + Guid.NewGuid().ToString("N"));
         var ownWorkDirectory = options.WorkDirectory == null;
@@ -152,6 +178,23 @@ public sealed class AlToolTestRunner
     /// <summary>Serialises test groups as the AL tool's <c>--testgroups</c> JSON.</summary>
     public static string SerializeTestGroups(IEnumerable<TestGroup> groups) => JsonSerializer.Serialize(groups, GroupJson);
 
+    /// <summary>The state reset codeunit for the permissions mock setting.</summary>
+    public static int StateResetCodeunitId(bool permissionsMock) =>
+        permissionsMock ? ResetMockStartedCodeunitId : ResetMockStoppedCodeunitId;
+
+    public static bool IsStateResetCodeunit(int codeunitId) =>
+        codeunitId is ResetMockStartedCodeunitId or ResetMockStoppedCodeunitId;
+
+    /// <summary>
+    /// The groups with the state reset codeunit before each of them ([reset, g1, reset, g2, ...]). The AL
+    /// tool runs the groups in order, in one session, and does not merge repeated codeunits.
+    /// </summary>
+    public static IReadOnlyList<TestGroup> WithStateResets(IEnumerable<TestGroup> groups, int resetCodeunitId)
+    {
+        var reset = new TestGroup(resetCodeunitId, Array.Empty<string>());
+        return groups.SelectMany(g => new[] { reset, g }).ToList();
+    }
+
     // Empty method list = all methods (no method of the codeunit is disabled); otherwise the enabled
     // methods only. Null when no method is enabled (nothing to run).
     private static TestGroup? BuildTestGroup(NavTestService.PreparedCodeunit codeunit)
@@ -170,7 +213,8 @@ public sealed class AlToolTestRunner
 
     private void RunBatch(List<CodeunitState> batch, Options options, TimeSpan timeout, string groupsFile, string label, List<string> errors)
     {
-        File.WriteAllText(groupsFile, SerializeTestGroups(batch.Select(s => s.Group!)));
+        var resetId = StateResetCodeunitId(options.PermissionsMock);
+        File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!), resetId)));
         var (fileName, arguments) = BuildCommand(options, groupsFile);
         Dictionary<string, string>? environment = null;
         if (string.Equals(options.Authentication, "UserPassword", StringComparison.OrdinalIgnoreCase))
@@ -229,12 +273,29 @@ public sealed class AlToolTestRunner
             }
 
             var count = 0;
+            var resets = 0;
             var byId = batch.GroupBy(s => s.Prepared.Codeunit.CodeunitId).ToDictionary(g => g.Key, g => g.First());
             foreach (var item in results.EnumerateArray())
             {
-                count++;
                 var codeunitId = item.TryGetProperty("codeunitId", out var idElement) && idElement.TryGetInt32(out var id) ? id : 0;
                 var methodName = GetString(item, "methodName") ?? "";
+                if (IsStateResetCodeunit(codeunitId))
+                {
+                    // The k-th reset runs before the k-th codeunit of the batch; it is not a test result.
+                    var next = batch[Math.Min(resets, batch.Count - 1)].Prepared.Codeunit;
+                    if (methodName.Equals(ResetMethodName, StringComparison.OrdinalIgnoreCase)) resets++;
+                    var status = GetString(item, "status");
+                    if (!string.Equals(status?.Trim(), "passed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var error = $"{label}: the state reset before codeunit {next.CodeunitId} {next.Name} failed " +
+                                    $"(codeunit {codeunitId} '{methodName}' {status ?? "without status"}): " +
+                                    $"{Abbreviate(SplitOutput(GetString(item, "output")).Message, 500)} The codeunit ran without a clean state.";
+                        Log.Error(error);
+                        errors.Add(error);
+                    }
+                    continue;
+                }
+                count++;
                 if (!byId.TryGetValue(codeunitId, out var state))
                 {
                     errors.Add($"{label}: the AL tool reported '{methodName}' of codeunit {codeunitId}, which was not requested.");
@@ -264,9 +325,16 @@ public sealed class AlToolTestRunner
                 }
                 Log.Warn(problem);
             }
+            if (resets < batch.Count)
+            {
+                var error = $"{label}: the AL tool reported {resets} of {batch.Count} state reset(s) (codeunit {resetId} {ResetMethodName}); " +
+                            "the codeunits without one ran without a clean state. Is the current BcDevEnv Test Runner app installed?";
+                Log.Error(error);
+                errors.Add(error);
+            }
             foreach (var state in batch)
                 state.Complete("The AL tool reported no result for this test.");
-            Log.Info($"{label}: {count} result(s), exit code {capture.ExitCode} ({elapsed.TotalSeconds:0.0}s).");
+            Log.Info($"{label}: {count} result(s) (+{resets} state reset(s)), exit code {capture.ExitCode} ({elapsed.TotalSeconds:0.0}s).");
         }
     }
 

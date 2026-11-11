@@ -53,6 +53,7 @@ codeunit 50100 "BcDevEnv Test Runner"
             TestSuiteMgt.SelectTestMethodsByExtension(ALTestSuite, extensionId)
         else
             TestSuiteMgt.SelectTestMethodsByRange(ALTestSuite, testCodeunitFilter);
+        ExcludeStateResetCodeunits(SuiteName);
 
         // Run everything in the suite.
         TestMethodLine."Test Suite" := SuiteName;
@@ -100,6 +101,7 @@ codeunit 50100 "BcDevEnv Test Runner"
             else
                 TestSuiteMgt.SelectTestMethodsByRange(ALTestSuite, testCodeunitFilter);
 
+        ExcludeStateResetCodeunits(SuiteName);
         ApplyDisabledTests(SuiteName, DisabledMethods);
         Commit();
 
@@ -207,6 +209,17 @@ codeunit 50100 "BcDevEnv Test Runner"
             CodeunitMetadata.SetFilter(ID, TestCodeunitFilter);
 
         TestSuiteMgt.GetTestMethods(ALTestSuite, CodeunitMetadata);
+    end;
+
+    // The state reset codeunits of this app are injected by 'bcdevenv run-tests --executor altool'
+    // before every test codeunit; they are never selected as tests (only matters without an extension filter).
+    local procedure ExcludeStateResetCodeunits(SuiteName: Code[10])
+    var
+        TestMethodLine: Record "Test Method Line";
+    begin
+        TestMethodLine.SetRange("Test Suite", SuiteName);
+        TestMethodLine.SetFilter("Test Codeunit", '%1|%2', Codeunit::"BcDevEnv Reset Mock Started", Codeunit::"BcDevEnv Reset Mock Stopped");
+        TestMethodLine.DeleteAll();
     end;
 
     // Disabled tests: [{"codeunitName": "...", "methods": ["...", "*"]}], keyed by lower-case codeunit name.

@@ -234,7 +234,18 @@ public static class RunTestsCommand
             Password = run.Password,
             BatchSize = ParsePositiveInt(a.Get("altool-batch-size"), "altool-batch-size", AlToolTestRunner.DefaultBatchSize),
             Timeout = TimeSpan.FromMinutes(ParsePositiveInt(a.Get("app-timeout-minutes"), "app-timeout-minutes", AlToolTestRunner.DefaultTimeoutMinutes)),
+            PermissionsMock = ParsePermissionsMock(a.Get("permissions-mock")),
         };
+    }
+
+    /// <summary>--permissions-mock: on (default; started without assignments before every codeunit) or off (stopped).</summary>
+    public static bool ParsePermissionsMock(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return true;
+        var trimmed = value.Trim();
+        if (trimmed.Equals("on", StringComparison.OrdinalIgnoreCase)) return true;
+        if (trimmed.Equals("off", StringComparison.OrdinalIgnoreCase)) return false;
+        throw new BcDevEnvException($"Invalid --permissions-mock '{value}'. Use on or off.");
     }
 
     private static int ParsePositiveInt(string? value, string optionName, int defaultValue)

@@ -133,6 +133,11 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
   --altool-batch-size <n>   Test codeunits per runtests call (default: 20)
   --app-timeout-minutes <n> Total AL tool time budget for this run (default: 240); batches
                             that do not fit are reported as infrastructure errors
+  --permissions-mock <on|off>  Before every test codeunit a BcDevEnv Test Runner codeunit
+                            resets the session (ClearLastError, ApplicationArea(''), the first
+                            work date, codeunits 130301/132553 when present). on (default):
+                            the permissions mock is then started without assignments; off:
+                            it is stopped. A failed reset is an infrastructure error.
 
   Runner call failures and disabled-test violations fail the command even with --allow-failures.
 """,

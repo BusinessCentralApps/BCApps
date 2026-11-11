@@ -30,6 +30,7 @@ param(
     [string] $TestExecutor = '',
     [string] $AlToolVersion = '',
     [string] $AppTestTimeoutMinutes = '',
+    [string] $TestPermissionsMock = '',
     [string] $T2EmbedUrl = ''
 )
 
@@ -93,11 +94,13 @@ Write-Host "Test type:     $(if ($plan.TestType) { $plan.TestType } else { '(non
 Write-Host "Company:       $($plan.CompanyName)$(if ($plan.EvaluationCompany) { ' (evaluation company)' })"
 Write-Host "Company setup: $(if (@($plan.CompanyCodeunits).Count) { $plan.CompanyCodeunits -join ', ' } else { '(empty company)' })"
 foreach ($pass in $plan.Passes) { Write-Host "Test pass:     $($pass.Name), test runner $($pass.RunnerId)" }
-$executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes
+$executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes -PermissionsMock $TestPermissionsMock
 $executorLabel = if ($executor.Executor -eq 'altool') { "altool $($executor.AlToolVersion)" } else { 'odata' }
+$permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started without assignments)' } else { 'off (stopped)' }
 if ($plan.Action -eq 'Test') {
     if ($executor.Executor -eq 'altool') {
         Write-Host "Test executor: altool - AL tool $($executor.AlToolVersion) runtests (client session, development endpoint port $devPort), $($executor.AppTimeoutMinutes) min per test app and pass; the BcDevEnvTestRunner selects the tests"
+        Write-Host "State reset:   before every test codeunit (BcDevEnv Test Runner); permissions mock $permissionsMockLabel"
     }
     else {
         Write-Host "Test executor: odata - the BcDevEnvTestRunner OData service selects and runs the tests"
@@ -206,14 +209,26 @@ try {
     if ($selected.Count -gt 0) {
         Write-Section 'Compile the BcDevEnv Test Runner app'
         if ($apps | Where-Object { $_.Id -eq $runnerAppId }) { throw "The install set already contains an app with the BcDevEnv Test Runner id $runnerAppId." }
+        $runnerSource = Join-Path $work 'runner-src'
+        Copy-Item -LiteralPath (Join-Path $toolRoot 'testrunner') -Destination $runnerSource -Recurse
+        $runnerRootIds = @($runnerDependencyIds)
+        if ($executor.Executor -eq 'altool') {
+            # The state reset before every test codeunit controls the permissions mock only when it is installed.
+            $mockApp = Set-BcDevEnvRunnerPermissionsMock -AppJsonPath (Join-Path $runnerSource 'app.json') -Apps $apps
+            if ($mockApp) {
+                $runnerRootIds += $mockApp.Id
+                Write-Host "Permissions Mock $($mockApp.Version) is installed: the state reset sets the permissions mock $permissionsMockLabel."
+            }
+            else {
+                Write-Host "Permissions Mock is not installed: the state reset does not control the permissions mock."
+            }
+        }
         $symbols = Join-Path $work 'runner-symbols'
         New-Item -ItemType Directory -Path $symbols -Force | Out-Null
         Copy-Item -LiteralPath $layout.SystemApp -Destination $symbols
-        foreach ($dependency in @(Get-BcDevEnvDependencyClosure -OrderedApps $apps -RootIds $runnerDependencyIds)) {
+        foreach ($dependency in @(Get-BcDevEnvDependencyClosure -OrderedApps $apps -RootIds $runnerRootIds)) {
             Copy-Item -LiteralPath $dependency.Path -Destination $symbols
         }
-        $runnerSource = Join-Path $work 'runner-src'
-        Copy-Item -LiteralPath (Join-Path $toolRoot 'testrunner') -Destination $runnerSource -Recurse
         $alc = Find-BcDevEnvAlc -VsixPath $layout.Vsix -Destination (Join-Path $work 'alc')
         $runnerApp = Join-Path $work 'runner\BcDevEnv_BcDevEnv Test Runner.app'
         New-Item -ItemType Directory -Path (Split-Path $runnerApp -Parent) -Force | Out-Null
@@ -336,7 +351,8 @@ try {
             $containerResult = "$containerRunFolder\results\$resultName"
             $hostResult = Join-Path $resultsFolder $resultName
             $runArguments = Get-BcDevEnvRunTestsArguments -ODataUrl $odataUrl -CompanyName $plan.CompanyName -App $app -Pass $pass -DisabledTestsRoots $containerDisabledRoots -ResultFile $containerResult `
-                -Executor $executor.Executor -AlToolPath $containerAlTool -DotnetPath $containerDotnet -DevPort $devPort -ServerInstance 'BC' -AppTimeoutMinutes $executor.AppTimeoutMinutes
+                -Executor $executor.Executor -AlToolPath $containerAlTool -DotnetPath $containerDotnet -DevPort $devPort -ServerInstance 'BC' -AppTimeoutMinutes $executor.AppTimeoutMinutes `
+                -PermissionsMock $executor.PermissionsMock
             $exitCode = Invoke-Docker -Arguments (@('exec', '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli) + $runArguments) -AllowFailure -Description "bcdevenv run-tests ($($app.Name))"
             $copyExit = Invoke-Docker -Arguments @('cp', "$($names.ContainerName):$containerResult", $hostResult) -AllowFailure -Description 'Copying the test results'
             if ($copyExit -ne 0 -or -not (Test-Path -LiteralPath $hostResult)) {

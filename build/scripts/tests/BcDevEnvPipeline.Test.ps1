@@ -406,8 +406,17 @@ Describe "Get-BcDevEnvRunTestsArguments" {
         $pass = [pscustomobject]@{ TestType = 'IntegrationTest'; Isolation = 'None'; RunnerId = 130450 }
         $arguments = Get-BcDevEnvRunTestsArguments -ODataUrl 'http://localhost:7048/BC/ODataV4' -CompanyName 'CRONUS' -App $app -Pass $pass -DisabledTestsRoots @('C:\d\0') -ResultFile 'C:\r\1.xml' `
             -Executor 'altool' -AlToolPath 'C:\altool\altool.dll' -DotnetPath 'C:\Program Files\dotnet\dotnet.exe' -DevPort 7049 -ServerInstance 'BC' -AppTimeoutMinutes 90
-        ($arguments -join ' ') | Should -Be 'run-tests --odata-url http://localhost:7048/BC/ODataV4 --service-name BcDevEnvTestRunner --company CRONUS --protocol per-codeunit --extension aaaa --app-name Library Tests --disabled-tests C:\d\0 --test-type IntegrationTest --required-test-isolation None --test-runner-codeunit-id 130450 --result-file C:\r\1.xml --suite-name BusinessCentral --timeout-minutes 60 --allow-failures --allow-empty --executor altool --altool C:\altool\altool.dll --dotnet C:\Program Files\dotnet\dotnet.exe --dev-port 7049 --server-instance BC --app-timeout-minutes 90'
+        ($arguments -join ' ') | Should -Be 'run-tests --odata-url http://localhost:7048/BC/ODataV4 --service-name BcDevEnvTestRunner --company CRONUS --protocol per-codeunit --extension aaaa --app-name Library Tests --disabled-tests C:\d\0 --test-type IntegrationTest --required-test-isolation None --test-runner-codeunit-id 130450 --result-file C:\r\1.xml --suite-name BusinessCentral --timeout-minutes 60 --allow-failures --allow-empty --executor altool --altool C:\altool\altool.dll --dotnet C:\Program Files\dotnet\dotnet.exe --dev-port 7049 --server-instance BC --app-timeout-minutes 90 --permissions-mock on'
         $arguments | Should -Contain 'C:\Program Files\dotnet\dotnet.exe'
+    }
+
+    It "passes --permissions-mock off to the altool executor only" {
+        $app = [pscustomobject]@{ Id = 'i'; Name = 'n' }
+        $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
+        $off = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' -AlToolPath 'a.dll' -PermissionsMock $false
+        ($off -join ' ') | Should -BeLike '* --permissions-mock off'
+        $odata = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'odata' -PermissionsMock $false
+        $odata | Should -Not -Contain '--permissions-mock'
     }
 
     It "requires the AL tool path for the altool executor and rejects unknown executors" {
@@ -424,6 +433,16 @@ Describe "Get-BcDevEnvTestExecutorSettings" {
         $executor.Executor | Should -Be 'altool'
         $executor.AlToolVersion | Should -Be '30.0.44.47290-beta'
         $executor.AppTimeoutMinutes | Should -Be 240
+        $executor.PermissionsMock | Should -BeTrue
+    }
+
+    It "reads bcdevenvTestPermissionsMock (boolean or on/off) and lets a non-empty input override it" {
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = $false })).PermissionsMock | Should -BeFalse
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = 'Off' })).PermissionsMock | Should -BeFalse
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = $true })).PermissionsMock | Should -BeTrue
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = $false }) -PermissionsMock ' on ').PermissionsMock | Should -BeTrue
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = $true }) -PermissionsMock 'false').PermissionsMock | Should -BeFalse
+        (Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings @{ bcdevenvTestPermissionsMock = $false }) -PermissionsMock '').PermissionsMock | Should -BeFalse
     }
 
     It "reads the bcdevenv settings and lets non-empty inputs override them" {
@@ -445,6 +464,7 @@ Describe "Get-BcDevEnvTestExecutorSettings" {
         @{ Case = 'a version with a path'; Arguments = @{ AlToolVersion = '30.0.44.1/../x' }; Message = '*Invalid AL tool version*' }
         @{ Case = 'a zero timeout'; Arguments = @{ AppTimeoutMinutes = '0' }; Message = "*Invalid test timeout '0'*" }
         @{ Case = 'a non-numeric timeout'; Arguments = @{ AppTimeoutMinutes = 'abc' }; Message = "*Invalid test timeout 'abc'*" }
+        @{ Case = 'an invalid permissions mock switch'; Arguments = @{ PermissionsMock = 'yes' }; Message = "*Invalid permissions mock setting 'yes'*" }
     ) {
         param($Case, $Arguments, $Message)
         { Get-BcDevEnvTestExecutorSettings -Settings (New-TestSettings) @Arguments } | Should -Throw $Message
@@ -543,11 +563,55 @@ Describe "RunBcDevEnvPipeline action contract" {
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'TestExecutor'
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AlToolVersion'
         @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'AppTestTimeoutMinutes'
+        @($mapped | ForEach-Object { $_.Parameter }) | Should -Contain 'TestPermissionsMock'
         foreach ($entry in $mapped) {
             $parameters | Should -Contain $entry.Parameter
             $action | Should -Match ('(?m)^  {0}:\s*$' -f [regex]::Escape($entry.Env))
             $action | Should -Match ('(?m)^\s+_{0}:\s+\$\{{\{{ inputs\.{0} \}}\}}' -f [regex]::Escape($entry.Env))
         }
+    }
+}
+
+Describe "Set-BcDevEnvRunnerPermissionsMock" {
+    BeforeEach {
+        $appJson = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner/app.json') -Destination $appJson
+        $original = Get-Content -LiteralPath $appJson -Raw
+        $mock = New-ManifestObject -Id '40860557-a18d-42ad-aecb-22b7dd80dc80' -Name 'Permissions Mock' -Version '30.0.1.2'
+        $other = New-ManifestObject -Id '11111111-1111-1111-1111-111111111111' -Name 'Other'
+    }
+
+    It "leaves app.json unchanged when Permissions Mock is not installed" {
+        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other) | Should -BeNullOrEmpty
+        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @() | Should -BeNullOrEmpty
+        Get-Content -LiteralPath $appJson -Raw | Should -Be $original
+        (Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).PSObject.Properties['preprocessorSymbols'] | Should -BeNullOrEmpty
+    }
+
+    It "adds the dependency and the BCDEVENV_PERMISSIONSMOCK symbol once, keeping the other dependencies" {
+        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
+        (Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other, $mock)).Name | Should -Be 'Permissions Mock'
+        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($mock) | Out-Null
+        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
+        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_PERMISSIONSMOCK')
+        $dependencies = @($json.dependencies)
+        $dependencies.Count | Should -Be ($before.Count + 1)
+        foreach ($dependency in $before) { @($dependencies.id) | Should -Contain $dependency.id }
+        $added = @($dependencies | Where-Object { $_.id -eq '40860557-a18d-42ad-aecb-22b7dd80dc80' })
+        $added.Count | Should -Be 1
+        $added[0].name | Should -Be 'Permissions Mock'
+        $added[0].publisher | Should -Be 'Microsoft'
+        $added[0].version | Should -Be '30.0.1.2'
+    }
+
+    It "replaces an existing Permissions Mock dependency with the installed version" {
+        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
+        $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue @([pscustomobject]@{ id = '40860557-a18d-42ad-aecb-22b7dd80dc80'; name = 'Permissions Mock'; publisher = 'Microsoft'; version = '1.0.0.0' }) -Force
+        Set-Content -LiteralPath $appJson -Value ($json | ConvertTo-Json -Depth 10)
+        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($mock) | Out-Null
+        $dependencies = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
+        $dependencies.Count | Should -Be 1
+        $dependencies[0].version | Should -Be '30.0.1.2'
     }
 }
 

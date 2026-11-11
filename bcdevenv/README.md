@@ -205,6 +205,34 @@ With `per-codeunit`, `--executor` chooses who runs the selected tests:
   failed as well. The AL tool's `OnRun` entries are not reported as tests (a failed
   `OnRun` becomes the reason for the codeunit's missing results).
 
+**State reset (`altool`).** The server's development test runner raises none of the
+`Test Runner` hooks that reset the session around every test method, so the AL tool
+runs a reset test codeunit of the `BcDevEnv Test Runner` app before **every** test
+codeunit of every batch and isolation pass (`--testgroups [R, c1, R, c2, …]`):
+codeunit 50103 `BcDevEnv Reset Mock Started` with `--permissions-mock on` (default),
+50104 `BcDevEnv Reset Mock Stopped` with `--permissions-mock off`. Both call codeunit
+50102 `BcDevEnv Test State Reset`, which mirrors codeunit 130453 `ALTestRunner Reset
+Environment` (`BeforeTestMethod`/`AfterCodeunitRun`) and the permissions mock handling
+of `Test Runner - Mgt`:
+
+- `ClearLastError()` and `ApplicationArea('')`;
+- restores the work date the session had at the first reset;
+- runs codeunit 130301 `Reset State Before Test Run` (random seed 1, the legacy
+  permission catalog, the temporary notification context) and codeunit 132553
+  `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
+  does, so the runner app does not depend on test libraries);
+- leaves the `Permissions Mock` (codeunit 131006) **started without permission set
+  assignments** (`on`, the state the real runner gives every test method; the previous
+  codeunit's mock and its assignments are disposed first) or **stopped** (`off`).
+
+The reset codeunits are never selected as tests (`PrepareTests` drops them), and
+their results are not counted, not written to the JUnit report and not matched against
+DisabledTests; the log shows `N result(s) (+M state reset(s))` per batch. A reset that
+does not pass, or a batch that reports fewer resets than it sent (for example an
+outdated runner app), is an infrastructure error that fails the command even with
+`--allow-failures`. See [Known differences](#bcapps-ci-pipeline) for what the reset
+does not cover.
+
 ### DisabledTests
 
 `--disabled-tests <root>` (repeatable) together with `--app-name <name>` reads
@@ -288,12 +316,16 @@ build mode it:
    development endpoint (port 7049) accepts connections. The version defaults to
    `30.0.44.47290-beta`: `30.0.42.60748-beta` refuses every call against the
    `BCPlatform` 30.0 server ("supports Web API ≤ 7.0, debuggers ≤ 8.0"; the server
-   has Web API 8.0 and debugger 9.0). Each app has a time budget of 240 minutes.
+   has Web API 8.0 and debugger 9.0). Each app has a time budget of 240 minutes, and a
+   state reset runs before every test codeunit (see [Running tests](#running-tests);
+   the permissions mock part is on by default).
    Override them with the action inputs `testExecutor` (`altool`/`odata`; `odata`
-   is the previous web-service executor, kept as a fallback), `alToolVersion` and
-   `appTestTimeoutMinutes`, or the AL-Go settings `bcdevenvTestExecutor`,
-   `bcdevenvAlToolVersion` and `bcdevenvAppTestTimeoutMinutes`. The log names the
-   executor of every app and pass (`Tests: <app> - <pass> (executor altool <version>)`);
+   is the previous web-service executor, kept as a fallback), `alToolVersion`,
+   `appTestTimeoutMinutes` and `testPermissionsMock` (`on`/`off`), or the AL-Go
+   settings `bcdevenvTestExecutor`, `bcdevenvAlToolVersion`,
+   `bcdevenvAppTestTimeoutMinutes` and `bcdevenvTestPermissionsMock` (`true`/`false`).
+   The log names the executor of every app and pass (`Tests: <app> - <pass> (executor
+   altool <version>)`) and the permissions mock setting;
 5. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
    `AnalyzeTests`) and `<project>\.buildartifacts\TestResults.xml` (uploaded test
    results artifact); the log is written to `<project>\BuildOutput.txt`, and on
@@ -347,14 +379,36 @@ client session through the development endpoint's test runner hub, while
 BcContainerHelper drives the test tool page (page 130455) through the web client's
 client services endpoint. The hub only lets the caller choose the codeunits and
 methods; the server's development test runner chooses the runner codeunit, so the
-AL hooks of the `Test Runner` app's runners 130450/130451 do not run, and tests
-that rely on them may behave differently: the `Permissions Mock` start/stop around
-each method does not happen, so permission tests run as SUPER (about 31 failures
-per job), the `Library - Random` seed is not set, and `ALTestRunner Reset
-Environment` (codeunit 130453) does not reset the application area
-(`ApplicationArea('')`) before each method, so `TestPage` tests fail with "field/action
-not found" when an earlier test left a narrower application area (about 29 failures
-per job). Sending a non-empty
+AL hooks of the `Test Runner` app's runners 130450/130451 (`Test Runner - Mgt`,
+codeunit 130453 `ALTestRunner Reset Environment`) do not run. The state reset (see
+[Running tests](#running-tests)) approximates them **per test codeunit, not per test
+method**, so within a codeunit the following still carries over from one method to
+the next:
+
+- the application area, work date, last error, random seed and notification context
+  a method changes;
+- permission set assignments a method makes (`PermissionsMock.Set`,
+  `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method,
+  so with the mock on, a later method of the same codeunit may run with an earlier
+  method's lowered permissions, and tests that passed only because they ran as SUPER
+  may now fail. With the mock off (stopped), permission tests run as SUPER and
+  `PermissionsMock.ClearAssignments` without `Start` fails ("A DotNet variable has not
+  been instantiated"), as before the reset existed (about 31 + 8 failures per job).
+
+Codeunit 130302 `Set Restrictive Permissions` (the restrictive permission catalog the
+real runner sets before methods whose `TestPermissions` is not `Disabled`) is **not**
+run: the method's `TestPermissions` is unknown at codeunit granularity, `Disabled`
+methods need unrestricted permissions, and its catalog would only last until the
+first permission lowering of the codeunit. So the tests do not detect missing
+permissions beyond those the tests lower themselves. Codeunit 132553 is in `Prevent
+Metadata Updates Library`, which the pipeline does not publish, so it normally does
+not run. The mock part is compiled into the runner only when the `Permissions Mock`
+app is in the install set (the action adds the dependency and the
+`BCDEVENV_PERMISSIONSMOCK` preprocessor symbol to its copy of the runner's
+`app.json`, and logs it); otherwise the reset does not control the mock. Switch the
+mock part with the action input `testPermissionsMock` or the AL-Go setting
+`bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
+both. Sending a non-empty
 method list (codeunits with some methods disabled) has not been verified against a
 live server yet. With `testExecutor: odata` the tests run in a web-service session
 instead, where `TestPage`s, report request pages and UI handlers fail with
