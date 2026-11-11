@@ -617,16 +617,39 @@ public class AlToolExecutorTests
         Assert.Equal("State reset: 41 state reset(s) committed (41 passed); \"Application Area Setup\" (baseline 1 row(s)) restored by 0 of them: " +
                      "0 row(s) removed, 0 re-created, 0 modified; login ApplicationArea cleared in 83 session(s) (83 had one set at login).", info);
         Assert.Null(warning);
-        Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary, 41));
+        Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary, 2));
         Assert.EndsWith("; there is no \"Application Area Setup\" table to restore; login ApplicationArea cleared in 2 session(s) (0 had one set at login).",
             AlToolTestRunner.StateResetSummaryMessages(new NavTestService.StateResetSummary { Resets = 1, LoginSessions = 2 }, 1).Info);
 
-        // Every passed reset ran in a client session of its own, so the hook should have counted each of them.
-        Assert.Contains("cleared in only 0 session(s), fewer than the 41 passed state reset(s)",
-            AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = 0, LoginSessionsWithArea = 0 }, 41));
+        // Every AL tool invocation logs in once, however many resets and test codeunits it runs (W1: 8 sessions for
+        // 8 batches with 159 resets), so the hook should have counted at least one session per invocation.
+        Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary with { Resets = 159, LoginSessions = 8, LoginSessionsWithArea = 0 }, 8));
+        Assert.Contains("cleared in only 7 session(s), fewer than the 8 AL tool invocation(s) that reported results",
+            AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = 7, LoginSessionsWithArea = 0 }, 8));
+        Assert.Contains("cleared in only 0 session(s), fewer than the 1 AL tool invocation(s)",
+            AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = 0, LoginSessionsWithArea = 0 }, 1));
         // A runner app without the login hook reports no sessions: neither a count nor a warning.
         Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = null }, 41));
         Assert.DoesNotContain("login", AlToolTestRunner.StateResetSummaryMessages(summary with { LoginSessions = null }, 41).Info);
+    }
+
+    [Fact]
+    public void Only_al_tool_invocations_that_reported_results_are_counted_as_logins()
+    {
+        var tool = new FakeAlTool((call, groups) => call == 2
+            ? FakeAlTool.Output(1, "Unable to connect to the server.")
+            : FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(
+            Prepared(50001, "A", true, Pending("T")), Prepared(50002, "B", true, Pending("T")),
+            Prepared(50003, "C", true, Pending("T")), Prepared(50004, "D", true, Pending("T")),
+            Prepared(50005, "E", true, Pending("T")));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: 2));
+
+        Assert.Equal(3, tool.Calls.Count);
+        Assert.Equal(2, run.Invocations);
+        Assert.Equal(3, run.StateResetsPassed);
+        Assert.Single(run.RunnerErrors);
     }
 
     [Fact]
@@ -668,7 +691,7 @@ public class AlToolExecutorTests
     }
 
     [Fact]
-    public void The_state_probe_runs_once_per_batch_after_the_first_reset_and_is_no_test_result()
+    public void The_state_probe_runs_once_per_batch_before_the_first_reset_and_is_no_test_result()
     {
         const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
         const int probe = AlToolTestRunner.StateProbeCodeunitId;
@@ -681,9 +704,10 @@ public class AlToolExecutorTests
         var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: 2) with { StateProbe = true });
 
         Assert.Empty(run.RunnerErrors);
-        Assert.Equal(new[] { new[] { reset, probe, 50001, reset, 50002 }, new[] { reset, probe, 50003 } },
+        // First, so that the batch's first reset clears its error before any test codeunit runs.
+        Assert.Equal(new[] { new[] { probe, reset, 50001, reset, 50002 }, new[] { probe, reset, 50003 } },
             tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
-        Assert.All(tool.Calls, c => Assert.Equal(new[] { AlToolTestRunner.StateProbeMethodName }, c.AllGroups[1].TestMethods));
+        Assert.All(tool.Calls, c => Assert.Equal(new[] { AlToolTestRunner.StateProbeMethodName }, c.AllGroups[0].TestMethods));
         Assert.All(tool.Calls, c => Assert.Empty(FakeAlTool.RepeatedTestCases(c.AllGroups)));
         Assert.Equal(new[] { 50001, 50002, 50003 }, run.Result.Codeunits.Select(c => c.CodeunitId!.Value));
         Assert.Equal(3, run.Result.Total);
@@ -782,7 +806,7 @@ public class AlToolExecutorTests
     }
 
     [Fact]
-    public void A_stopped_permissions_mock_is_restarted_on_test_initialize_with_the_recorded_base_while_a_run_is_active()
+    public void Test_initialize_clears_the_last_error_and_restarts_a_stopped_permissions_mock_with_the_recorded_base_while_a_run_is_active()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvMockRestart.Codeunit.al"))) dir = dir.Parent;
@@ -806,8 +830,13 @@ public class AlToolExecutorTests
         Assert.True(subscriber.Success);
         var body = subscriber.Groups["body"].Value;
         var restartCall = body.IndexOf("TestStateReset.RestartStoppedPermissionsMock();", StringComparison.Ordinal);
-        Assert.InRange(body.IndexOf("if PermissionsMock.IsStarted() then", StringComparison.Ordinal), 0, restartCall);
-        Assert.InRange(body.IndexOf("if not LoginAppArea.IsRunActive() then", StringComparison.Ordinal), 0, restartCall);
+        var startedExit = body.IndexOf("if PermissionsMock.IsStarted() then", StringComparison.Ordinal);
+        var runActiveExit = body.IndexOf("if not LoginAppArea.IsRunActive() then", StringComparison.Ordinal);
+        var clearLastError = body.IndexOf("ClearLastError();", StringComparison.Ordinal);
+        Assert.InRange(startedExit, 0, restartCall);
+        Assert.InRange(runActiveExit, 0, restartCall);
+        // The last error is cleared in every initializing method of a run, also when the mock is started.
+        Assert.InRange(clearLastError, runActiveExit, startedExit);
         // A started mock keeps the assignments the test made before its Initialize.
         Assert.DoesNotMatch(@"ClearAssignments|\.Set\(|\.Assign\(|\.Stop\(\)|\.Start\(\)", code);
         Assert.Matches(@"\r?\n    procedure IsRunActive\(\): Boolean", login);
@@ -821,6 +850,9 @@ public class AlToolExecutorTests
         Assert.DoesNotContain("#endif", reset[guardAt..restartAt]);
         var resetProcedure = AlProcedure(reset, @"procedure Reset\(StartPermissionsMock: Boolean; FullAccessBase: Boolean\)");
         Assert.InRange(resetProcedure.IndexOf("SetPermissionsMockBase(StartPermissionsMock, FullAccessBase);", StringComparison.Ordinal), 0, resetProcedure.IndexOf("Commit();", StringComparison.Ordinal));
+        // The reset clears the last error last, so no earlier test codeunit (or the state probe) leaves one for the next.
+        var resetCode = Regex.Replace(resetProcedure, @"(?m)^\s*//[^\r\n]*\r?\n", "").TrimEnd();
+        Assert.EndsWith("RunIfPresent(132553);\r\n        ClearLastError();", resetCode.ReplaceLineEndings("\r\n"));
 
         // No base outside a run: PrepareTests (before its commit) and EndTestRun forget it.
         var prepare = AlProcedure(runner, @"procedure PrepareTests\([^)]*\): Text");
@@ -1093,7 +1125,7 @@ public class AlToolExecutorTests
         Assert.Equal(0, RunCommand(WithPrepare(plan, template), tool, "--executor", "altool", "--altool", alTool,
             "--result-file", Path.Combine(dir.Path, "default.xml")));
 
-        Assert.Equal(new[] { new[] { AlToolTestRunner.ResetMockStartedCodeunitId, AlToolTestRunner.StateProbeCodeunitId, 50001 },
+        Assert.Equal(new[] { new[] { AlToolTestRunner.StateProbeCodeunitId, AlToolTestRunner.ResetMockStartedCodeunitId, 50001 },
                              new[] { AlToolTestRunner.ResetMockStartedCodeunitId, 50001 } },
             tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
         var junit = XDocument.Load(probed);

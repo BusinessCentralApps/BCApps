@@ -1,13 +1,12 @@
 // Diagnostic only: 'bcdevenv run-tests --executor altool --state-probe on' runs ProbeState once per AL tool
-// batch, right after the first state reset and before the first test codeunit. It always fails on purpose:
-// its error message is one line with the state a test codeunit starts with (application area, what the login
-// hook of codeunit 50109 did in this session, session, work date, permissions mock and the base the state reset
-// recorded for it, the "Application Area
-// Setup" rows and the restores of the state reset since
-// PrepareTests) and whether a TestPage finds controls in the Basic and Suite application areas, with the
-// application area it found and after ApplicationArea(''). The CLI logs it as "State probe: ..." and never
-// reports it as a test result. The AL tool runs every test codeunit in a new session, so the probe's own
-// session state does not reach the next codeunit.
+// batch, as its first test codeunit, before the first state reset. It always fails on purpose: its error message
+// is one line with the state at the start of the batch (application area, what the login hook of codeunit 50109
+// did in this session, session, work date, permissions mock and the base the last state reset recorded for it,
+// the "Application Area Setup" rows and the restores of the state reset since PrepareTests) and whether a
+// TestPage finds controls in the Basic and Suite application areas, with the application area it found and after
+// ApplicationArea(''). The CLI logs it as "State probe: ..." and never reports it as a test result. Its error
+// would be the last error of the next test codeunit (the last error carries over between the test codeunits of
+// an AL tool invocation), so it runs before the first state reset, which clears the last error.
 namespace BcDevEnv.TestRunner;
 
 using System.Reflection;

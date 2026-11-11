@@ -83,7 +83,7 @@ inputs:
   testStateProbe:
     description: >-
       altool executor, diagnostic: on runs the BcDevEnv State Probe test codeunit once per AL tool batch,
-      right after the first state reset, and logs its message ("State probe: ..." - ApplicationArea and the
+      first, before the first state reset, and logs its message ("State probe: ..." - ApplicationArea and the
       login hook, session, Application Area Setup and its restores, TestPage control visibility, permissions
       mock, work date). It always fails and is not a test result. Empty uses the AL-Go setting
       bcdevenvTestStateProbe, else off.

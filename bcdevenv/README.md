@@ -207,15 +207,23 @@ With `per-codeunit`, `--executor` chooses who runs the selected tests:
   `OnRun` becomes the reason for the codeunit's missing results).
 
 **State reset (`altool`).** The server's development test runner raises none of the
-`Test Runner` hooks that reset the test state around every test method, and it runs
-every test codeunit in a **new session** (the state probe reports a new session id for
-every codeunit). Session state — the application area, work date, last error,
-notification context, single-instance codeunits — therefore starts fresh in every test
-codeunit by construction: the application area is computed at login from table 9178
-`Application Area Setup` (and then cleared, see **Login application area** below),
-the work date is the login default, and `Library - Random`
-seeds itself with 1 on its first use in the session. What one test codeunit leaves for
-the next is the state that outlives a session: committed data and the permissions mock.
+`Test Runner` hooks that reset the test state around every test method. What carries
+over from one test codeunit to the next was observed in CI (state probe, failures),
+not taken from server documentation:
+
+- every AL tool invocation (one batch, see below) logs in once: the login hook below
+  counts one client session per batch (8 for the 8 batches of a W1 pass), and the probe
+  of batch k reports k sessions since `PrepareTests`. `SessionId()` still returns a
+  different id in every test codeunit;
+- within a batch, the last error carries over (a codeunit that ended with an error left
+  it for the `GetLastErrorText()` checks of the next codeunits), and so does
+  single-instance state: the permissions mock that a reset starts, and what the login
+  hook recorded at login, which the probe reads;
+- an `ApplicationArea('')` that a reset codeunit set was not seen by the next codeunit,
+  which had the application area that `Application Area Setup` gives (a committed
+  `#BasicHR` row);
+- whether the work date carries over is not verified; committed data does.
+
 So the AL tool runs a reset test codeunit of the `BcDevEnv Test Runner` app before
 **every** test codeunit of every batch and isolation pass: with `--permissions-mock on` (default)
 codeunit 50103 `BcDevEnv Reset Mock Started` before test codeunits whose
@@ -243,15 +251,16 @@ reaches the next test codeunit:
   through `RecordRef` (no Base Application dependency), and kept in isolated storage
   (module scope). Without it, a row that a codeunit with `RequiredTestIsolation =
   Disabled` commits — `APIV1 - Employees E2E` enables the Basic HR experience for the
-  company — gives every later codeunit's session the `#BasicHR` application area, so
-  `TestPage` controls with `ApplicationArea = Basic, Suite` are "not found on the
-  page". The Test Runner does not need this: it runs all tests in one long-lived
-  session, whose application area is not computed again;
+  company — gives the codeunits of every later batch the `#BasicHR` application area
+  at login, so `TestPage` controls with `ApplicationArea = Basic, Suite` are "not found
+  on the page". The Test Runner does not need this: it clears the application area
+  before every method;
 - runs codeunit 130301 `Reset State Before Test Run` (random seed 1, the legacy
   permission catalog, the temporary notification context) and codeunit 132553
   `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
-  does, so the runner app does not depend on test libraries). They act on the reset's
-  own session; whether any of it reaches the next test codeunit is not verified;
+  does, so the runner app does not depend on test libraries). What 130301 resets is
+  single-instance state like the mock's; that it reaches the next test codeunit is not
+  verified individually;
 - leaves the `Permissions Mock` (codeunit 131006) **started** (`on`; the previous
   codeunit's mock and its assignments are disposed first) or **stopped** (`off`). When
   started, the mock has **no permission set assignments** before codeunits whose
@@ -261,11 +270,17 @@ reaches the next test codeunit:
   `TestPermissions` is not `Disabled` (`Restrictive` and `NonRestrictive` alike). It
   assigns `D365 Full Access` with `All Objects`, `Test Tables`, `D365 Basic` and
   `LOCAL` (when present), the base that `Library - Lower Permissions` lowers from.
-  With the mock off, 130302 never runs. The mock outlives the session although it is
-  single-instance state: the probe, in its own session, sees the mock that the reset
-  started, and the failures of tests that need a started mock disappeared with the
-  reset. That the D365 Full Access base reaches the next codeunit too is not verified
-  yet.
+  With the mock off, 130302 never runs. The mock is single-instance state, which
+  carries over within a batch: the probe sees the mock that the reset started, and the
+  failures of tests that need a started mock disappeared with the reset. That the D365
+  Full Access base reaches the next codeunit too is not verified yet;
+- clears the last error (`ClearLastError()`) last, as 130453 does before every test
+  method and `Test Runner - Mgt` after every test, so neither a failed test codeunit nor
+  the state probe leaves an error for the `GetLastErrorText()` or `GetLastErrorCode()`
+  checks of the next codeunit. Without it, `Video Test`, `VAT Group Mgmt Tests`
+  (`ConfirmHandlerYes`) and `Https Mock Email Test` failed on an earlier codeunit's
+  error, and `Filename Reminder Tests` failed because the reminder automation logged the
+  empty `Error('')` that `Filename End-To-End Tests` left behind.
 
 The value comes from `PrepareTests`: while it selects the tests, it records the
 `TestPermissions` that codeunit 130452 `Test Runner - Get Methods` reports for every
@@ -278,16 +293,19 @@ base, with a warning; a codeunit without a value (an older runner app) gets 5010
 base), with a warning. The plan line shows the split: `… (permissions mock started; N
 codeunit(s) with the D365 Full Access base, M without assignments)`.
 
-**Per-method restart of a stopped mock (`altool`).** The Test Runner starts a fresh
-mock before every test method; the reset runs only before the codeunit. A method that
-stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for example in
-`Expense Permissions Test`) therefore left it stopped for the later methods of its
+**Per-method last error and stopped mock (`altool`).** The Test Runner clears the last
+error and starts a fresh mock before every test method; the reset runs only before the
+codeunit. The last error of a failed method reached the next methods of its codeunit
+(their `GetLastErrorText()` checks failed with it nested in their own message), and a
+method that stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for
+example in `Expense Permissions Test`) left it stopped for the later methods of its
 codeunit, whose `Library - Lower Permissions` calls then did nothing
 (`SetExactPermissionSet` exits when the mock is not started), so they ran as SUPER.
 Each reset now records the base it applied (no assignments, D365 Full Access, or
 stopped) in isolated storage, committed with its restore. Codeunit 50110 subscribes to
 `OnTestInitialize` of codeunit 132250 `Library - Test Initialize`, which test methods
-raise first in their `Initialize()`, and, while a run is active and the mock is
+raise first in their `Initialize()`, and, while a run is active, clears the last error
+(as 130453's `BeforeTestMethod` does) and, when the mock is
 stopped, restarts it with that base: 130301 for no assignments, 130301 and then 130302
 for the D365 Full Access base, nothing when the reset stopped the mock (`off`). A
 started mock is never touched, so the assignments a test makes before its
@@ -305,8 +323,8 @@ sent (for example an outdated runner app), is an infrastructure error that fails
 command even with `--allow-failures`. After the last batch the CLI reads the runner's
 `GetStateResetSummary` and logs what the resets committed, for example
 `State reset: 41 state reset(s) committed (41 passed); "Application Area Setup"
-(baseline 0 row(s)) restored by 2 of them: 2 row(s) removed, 0 re-created, 0 modified;
-login ApplicationArea cleared in 82 session(s) (2 had one set at login).`
+(baseline 0 row(s)) restored by 1 of them: 1 row(s) removed, 0 re-created, 0 modified;
+login ApplicationArea cleared in 3 session(s) (0 had one set at login).`
 Each reset counts itself in the transaction of its restore, so fewer committed than
 passed resets means the server rolled resets back (a runner app whose reset codeunits
 are not `RequiredTestIsolation = Disabled`); that, and a runner app without the action,
@@ -315,38 +333,38 @@ cover.
 
 **Login application area (`altool`).** The Test Runner calls `ApplicationArea('')`
 before every test method (codeunit 130453), so its tests see every control whatever
-`Application Area Setup` holds. Here every test codeunit logs in anew, and the Base
+`Application Area Setup` holds. Here every AL tool invocation logs in, and the Base
 Application's login (`LogInManagement`, on `Company Triggers` `OnCompanyOpen`) sets the
 session's application area from that table: a company row in the baseline — the NL
 `My Company` has the Essential experience, without `#Manufacturing` — hides every
-control outside it ("not found on the page") from every test codeunit, which the
+control outside it ("not found on the page") from the test codeunits, which the
 restore above does not change. So codeunit 50109 `BcDevEnv Login App Area` subscribes
 to the platform's `Company Triggers` `OnCompanyOpenCompleted`, which is raised after all
 `OnCompanyOpen` subscribers, and calls `ApplicationArea('')` in every client session
 (`GuiAllowed`) that opens a company **while a test run is active**: from `PrepareTests`
 until the CLI calls the runner's `EndTestRun` when `run-tests` finishes (also after a
-failure). Each test codeunit, reset and probe of the AL tool runs in such a session, so
-each test codeunit starts with the empty application area, in its own session, before
-its code runs. Only the session changes, never the table: tests that read
-`Application Area Setup` (for example the fallback to it when the session's
-application area is empty) keep the standard semantics. The runner's OData sessions
-are not client sessions and are not affected. The summary line above reports the
-sessions (about the number of test codeunits, resets and probes) and how many had an
-application area at login; fewer sessions than passed resets is a warning, and so is a
-runner app without `EndTestRun`. Limits: the order among `OnCompanyOpenCompleted`
-subscribers is not defined (one that sets the application area after this one wins);
-**every** client session that opens a company while a run is active is affected,
-interactive web client sessions of any user included; and a run that ends without
-`EndTestRun` (a killed CLI, a lost connection) leaves the hook active until a later
-`run-tests` ends — in CI the container is discarded anyway. It clears the application
-area once per codeunit, not before every method (see
+failure). The AL tool's login is such a session, so the batch starts with the empty
+application area before its first codeunit runs; that it reaches every test codeunit of
+the batch is not verified yet (no W1 login had an application area to clear). Only the
+session changes, never the table: tests that read `Application Area Setup` (for example
+the fallback to it when the session's application area is empty) keep the standard
+semantics. The runner's OData sessions are not client sessions and are not affected.
+The summary line above reports the sessions (one per AL tool invocation) and how many
+had an application area at login; fewer sessions than AL tool invocations that reported
+results is a warning, and so is a runner app without `EndTestRun`. Limits: the order
+among `OnCompanyOpenCompleted` subscribers is not defined (one that sets the application
+area after this one wins); **every** client session that opens a company while a run is
+active is affected, interactive web client sessions of any user included; and a run
+that ends without `EndTestRun` (a killed CLI, a lost connection) leaves the hook active
+until a later `run-tests` ends — in CI the container is discarded anyway. It clears the
+application area once per login, not before every method (see
 [Known differences](#bcapps-ci-pipeline)).
 
 **State probe (`altool`, diagnostic, off by default).** With `--state-probe on`, the
-AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, right after
-the first state reset (`[{R1,[ResetTestState01]}, {50105,[ProbeState]}, c1,
-{R2,[ResetTestState02]}, c2, …]`). It runs in its own new session, like a test
-codeunit, so it sees the state the batch's first test codeunit starts with. Its only
+AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, first, before
+the first state reset (`[{50105,[ProbeState]}, {R1,[ResetTestState01]}, c1,
+{R2,[ResetTestState02]}, c2, …]`), so it sees the state that the batch's login left
+and its error is cleared by the first reset instead of reaching a test codeunit. Its only
 test method always fails with one diagnostic line, which the CLI logs as
 `State probe: <batch>: …`: `ApplicationArea()`, what the login hook did in the
 session (`login hook: cleared '<area at login>' at login; N client session(s) since
@@ -360,12 +378,7 @@ current application area and again after `ApplicationArea('')` inside the probe.
 probe is not a test: it is not counted, not written to the JUnit
 report, not matched against DisabledTests, and a missing probe result (an older runner
 app) is only a warning. Switch it with the action input `testStateProbe` or the AL-Go
-setting `bcdevenvTestStateProbe` (`true`/`on`, or `false`/`off`, the default). The
-repository's `.github/AL-Go-Settings.json` sets it to `true` **temporarily**, to show
-that every probe after a codeunit that committed an `Application Area Setup` row
-reports no rows and `ApplicationArea=''` again, and that the probe reports
-`ApplicationArea=''` with the area the login hook cleared also in companies whose
-baseline has a row (NL `My Company`); turn it off once that is confirmed.
+setting `bcdevenvTestStateProbe` (`true`/`on`, or `false`/`off`, the default).
 
 ### DisabledTests
 
@@ -522,14 +535,20 @@ methods; the server's development test runner chooses the runner codeunit, so th
 AL hooks of the `Test Runner` app's runners 130450/130451 (`Test Runner - Mgt`,
 codeunit 130453 `ALTestRunner Reset Environment`) do not run. The state reset (see
 [Running tests](#running-tests)) approximates them **per test codeunit, not per test
-method**. The methods of a test codeunit share its session, so the following still
-carries over from one method to the next:
+method**. The methods of a test codeunit run one after the other in the AL tool's
+session, so the following still carries over from one method to the next:
 
-- the session state a method changes: application area, work date, last error and
-  notification context, and the random sequence (the Test Runner reseeds with 1 before
-  every method; here only the codeunit's first use of `Library - Random` seeds 1; the
-  login hook clears the application area once, when the codeunit's session opens the
-  company, where the Test Runner clears it before every method);
+- the session state a method changes: application area, work date and notification
+  context, and the random sequence (the Test Runner reseeds with 1 before every method;
+  here 130301 seeds it with 1 before the codeunit, in the reset, and again only in a
+  method whose `Initialize()` finds the mock stopped; the login hook clears the
+  application area once per login, where the Test Runner clears it before every method);
+- the last error, in methods that do not raise `OnTestInitialize` or before their
+  `Initialize()`: codeunit 50110 clears it there (see [Running tests](#running-tests)),
+  the Test Runner before every method. A codeunit without `OnTestInitialize` — for
+  example `VAT Group Mgmt Tests`, whose `ConfirmHandlerYes` asserts an empty
+  `GetLastErrorText()` — starts clean after the reset, but after one failed method its
+  later methods fail on that method's error;
 - permission set assignments a method makes (`PermissionsMock.Set`,
   `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method
   (and, unless the method's `TestPermissions` is `Disabled`, assigns the D365 Full
@@ -545,9 +564,11 @@ carries over from one method to the next:
 
 Between test codeunits the reset restores only `Application Area Setup`; other data
 that codeunits with `RequiredTestIsolation = Disabled` commit stays for the later
-codeunits, as with the Test Runner, but each later codeunit computes its session state
-from it at login (except the application area, which the login hook clears), which the
-Test Runner's single session does not.
+codeunits, as with the Test Runner. The AL tool logs in again for every batch, and that
+login computes the session's state from such data (except the application area, which
+the login hook clears), which the Test Runner's single login does not. The work date
+that 130453 restores after every codeunit is not restored here; whether a work date
+that a codeunit sets reaches the next codeunit of its batch is not verified.
 
 The D365 Full Access base (codeunit 130302) is chosen per codeunit from its first
 selected method's `TestPermissions` (see [Running tests](#running-tests)); it needs
@@ -562,19 +583,20 @@ mock part with the action input `testPermissionsMock` or the AL-Go setting
 `bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
 both.
 
-The per-method restart of a stopped mock (codeunit 50110) is compiled only when
-`Application Test Library` is in the install set as well: the action then also adds
-that dependency and the `BCDEVENV_APPTESTLIB` symbol, and logs it, so projects without
-it (System Application, Business Foundation) are unaffected. It covers only methods
-that raise `OnTestInitialize` (in practice through their `Initialize()`), and it runs
-there, not before the method: calls that a method makes on the stopped mock before its
-`Initialize()` (for example `SetOutsideO365Scope`) do nothing, and the mock then starts
-with the base; a method that stops the mock and calls `Initialize()` again gets it
-restarted; and 130301's random seed 1 and notification context reset happen at that
-point, only in methods that found the mock stopped. Its order among other
-`OnTestInitialize` subscribers is not defined. The restarts are not counted: a count
-written in the test's session would be rolled back by its test isolation, and a commit
-there would change the test's transaction.
+The per-method part (codeunit 50110: the last error, the restart of a stopped mock) is
+compiled only when `Application Test Library` is in the install set as well: the action
+then also adds that dependency and the `BCDEVENV_APPTESTLIB` symbol, and logs it, so
+projects without it (System Application, Business Foundation) are unaffected. It
+covers only methods that raise `OnTestInitialize` (in practice through their
+`Initialize()`), and it runs there, not before the method: calls that a method makes on
+the stopped mock before its `Initialize()` (for example `SetOutsideO365Scope`) do
+nothing, and the mock then starts with the base; an error that a method raises and
+catches before its `Initialize()` is cleared there; a method that stops the mock and
+calls `Initialize()` again gets it restarted; and 130301's random seed 1 and
+notification context reset happen at that point, only in methods that found the mock
+stopped. Its order among other `OnTestInitialize` subscribers is not defined. The
+restarts are not counted: a count written in the test's session would be rolled back by
+its test isolation, and a commit there would change the test's transaction.
 
 The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
 `OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are

@@ -1,10 +1,11 @@
 // While a test run of 'bcdevenv run-tests' is active (from PrepareTests until the CLI calls EndTestRun), clears the
 // application area of every client session that opens a company: ApplicationArea(''), as codeunit 130453
-// "ALTestRunner Reset Environment" of the Test Runner does before every test method. The AL tool runs every test
-// codeunit in a new client session, whose application area the Base Application sets at login from
-// "Application Area Setup" (LogInManagement, on System Initialization's OnAfterInitialization, which is raised on
-// Company Triggers' OnCompanyOpen). OnCompanyOpenCompleted is raised after all OnCompanyOpen subscribers, so this
-// runs after that and before the test codeunit, in the test session itself. Only the session is changed, never the
+// "ALTestRunner Reset Environment" of the Test Runner does before every test method. Every AL tool invocation (one
+// batch of test codeunits) logs in once, as a client session whose application area the Base Application sets at
+// login from "Application Area Setup" (LogInManagement, on System Initialization's OnAfterInitialization, which is
+// raised on Company Triggers' OnCompanyOpen). OnCompanyOpenCompleted is raised after all OnCompanyOpen subscribers,
+// so this runs after that and before the batch's first test codeunit. That the cleared application area reaches every
+// test codeunit of the batch is not verified yet (W1 logins had none to clear). Only the session is changed, never the
 // table: tests that read "Application Area Setup" keep the standard semantics.
 //
 // Every client session that opens a company while the run is active gets the empty application area (all controls
@@ -101,8 +102,8 @@ codeunit 50109 "BcDevEnv Login App Area"
         exit(IsolatedStorage.Contains(ActiveKeyTok, DataScope::Module));
     end;
 
-    // Committed right away, so that the test isolation of the test codeunit that runs in this session cannot roll the
-    // count back. The AL tool opens its sessions one after the other; concurrent logins may lose a count.
+    // Committed right away, so that the test isolation of the test codeunit that runs after the login cannot roll the
+    // count back. The AL tool invocations log in one after the other; concurrent logins may lose a count.
     local procedure CountSession(HadArea: Boolean)
     var
         Counters: JsonObject;

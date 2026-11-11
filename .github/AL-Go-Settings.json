@@ -17,7 +17,6 @@
   "numberOfTenantsForTesting": 4,
   "enableCleanTestCodeunitExecution": true,
   "maxTestAppReruns": 2,
-  "bcdevenvTestStateProbe": true,
   "failOn": "newWarning",
   "workspaceCompilation": {
     "enabled": true,

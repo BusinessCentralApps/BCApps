@@ -116,8 +116,9 @@ public sealed class NavTestService
     /// <see cref="Resets"/> committed resets, <see cref="Restores"/> of them changed "Application Area Setup"
     /// (rows <see cref="Removed"/>, <see cref="Recreated"/>, <see cref="Modified"/>) back to its baseline of
     /// <see cref="BaselineRows"/> rows (-1: no baseline; <see cref="TablePresent"/> false: no such table).
-    /// <see cref="LoginSessions"/> client sessions got ApplicationArea('') at login, <see cref="LoginSessionsWithArea"/>
-    /// of them had an application area set at login (both null for a runner app without the login hook).
+    /// <see cref="LoginSessions"/> client sessions (one per AL tool invocation) got ApplicationArea('') at login,
+    /// <see cref="LoginSessionsWithArea"/> of them had an application area set at login (both null for a runner app
+    /// without the login hook).
     /// </summary>
     public sealed record StateResetSummary
     {

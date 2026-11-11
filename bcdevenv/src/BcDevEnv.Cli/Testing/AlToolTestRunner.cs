@@ -23,15 +23,15 @@ namespace BcDevEnv.Cli.Testing;
 /// process that cannot start, times out, or does not print a parseable JSON result with data is an
 /// infrastructure error; failed tests alone are not (the AL tool exits 1 for them).</para>
 ///
-/// <para>The server's development test runner raises none of the Test Runner's per-test events and runs every
-/// test codeunit in a new session, so session state (application area, work date, last error) starts fresh in
-/// every codeunit. While the run is active (PrepareTests until EndTestRun), the BcDevEnv Test Runner app clears
-/// the application area that such a session gets at login (ApplicationArea(''), as the Test Runner does before
-/// every test method); the CLI ends the run after the AL tool. A state reset codeunit of the BcDevEnv Test Runner
-/// app runs before every test codeunit of
-/// every batch for the state that outlives a session: it restores "Application Area Setup" to the baseline of
-/// PrepareTests and commits it (the reset codeunits have RequiredTestIsolation = Disabled), and it sets up the
-/// permissions mock: <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
+/// <para>The server's development test runner raises none of the Test Runner's per-test events. Observed: every AL
+/// tool process (batch) logs in once, and its test codeunits share the last error, single-instance state and the
+/// permissions mock (SessionId() differs per codeunit, and an application area set in one codeunit was not seen in
+/// the next). While the run is active (PrepareTests until EndTestRun), the BcDevEnv Test Runner app clears the
+/// application area that the login sets (ApplicationArea(''), as the Test Runner does before every test method); the
+/// CLI ends the run after the AL tool. A state reset codeunit of the BcDevEnv Test Runner app runs before every test
+/// codeunit of every batch for the state that carries over: it restores "Application Area Setup" to the baseline of
+/// PrepareTests and commits it (the reset codeunits have RequiredTestIsolation = Disabled), clears the last error, and
+/// sets up the permissions mock: <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
 /// <see cref="ResetMockStartedCodeunitId"/> for codeunits whose TestPermissions is Disabled (or unknown) and
 /// <see cref="ResetFullAccessCodeunitId"/> (the D365 Full Access base of codeunit 130302, as the Test Runner
 /// sets it for such methods) for all others. Its results are not test results; a reset that fails or is not
@@ -39,9 +39,9 @@ namespace BcDevEnv.Cli.Testing;
 /// the committed ones that the BcDevEnv Test Runner counted.</para>
 ///
 /// <para>Diagnostic only: with <see cref="Options.StateProbe"/>, the state probe codeunit
-/// (<see cref="StateProbeCodeunitId"/>) runs once per batch, right after the first state reset. It always
-/// fails; its message (the state a test codeunit starts with) is logged as "State probe: ..."
-/// and is neither a test result nor an infrastructure error.</para>
+/// (<see cref="StateProbeCodeunitId"/>) runs once per batch, first, before the first state reset (which clears
+/// its error, the last error of the session). It always fails; its message (the state at the start of the batch)
+/// is logged as "State probe: ..." and is neither a test result nor an infrastructure error.</para>
 /// </summary>
 public sealed class AlToolTestRunner
 {
@@ -87,7 +87,7 @@ public sealed class AlToolTestRunner
         /// </summary>
         public bool PermissionsMock { get; init; } = true;
 
-        /// <summary>Diagnostic: run the state probe (<see cref="StateProbeCodeunitId"/>) after the first state reset of every batch.</summary>
+        /// <summary>Diagnostic: run the state probe (<see cref="StateProbeCodeunitId"/>) first in every batch, before the first state reset.</summary>
         public bool StateProbe { get; init; }
     }
 
@@ -102,6 +102,13 @@ public sealed class AlToolTestRunner
         /// its changes (compare <see cref="NavTestService.StateResetSummary.Resets"/>).
         /// </summary>
         public int StateResetsPassed { get; init; }
+
+        /// <summary>
+        /// AL tool processes (batches) that reported test results. Each logs in once (one client session that opens the
+        /// company), so the login hook of the BcDevEnv Test Runner should have counted at least as many sessions
+        /// (<see cref="NavTestService.StateResetSummary.LoginSessions"/>).
+        /// </summary>
+        public int Invocations { get; init; }
     }
 
     /// <summary>One entry of the <c>--testgroups</c> file; an empty method list runs every method.</summary>
@@ -185,12 +192,13 @@ public sealed class AlToolTestRunner
                  $"(timeout {options.Timeout.TotalMinutes:0} min); {states.Count - runnable.Count} codeunit(s) not run (fully disabled or not prepared).");
         LogStateResetPlan(runnable, options);
         if (options.StateProbe)
-            Log.Info($"AL tool: diagnostic state probe codeunit {StateProbeCodeunitId} runs after the first state reset of every batch; " +
+            Log.Info($"AL tool: diagnostic state probe codeunit {StateProbeCodeunitId} runs first in every batch, before the first state reset; " +
                      $"its message is logged as \"{StateProbeLogPrefix.TrimEnd()} ...\" and is not a test result.");
 
         var workDirectory = options.WorkDirectory ?? Path.Combine(Path.GetTempPath(), "bcdevenv-altool-" + Guid.NewGuid().ToString("N"));
         var ownWorkDirectory = options.WorkDirectory == null;
         var resetsPassed = 0;
+        var invocations = 0;
         Directory.CreateDirectory(workDirectory);
         try
         {
@@ -205,7 +213,8 @@ public sealed class AlToolTestRunner
                     Fail(batch, error, errors);
                     continue;
                 }
-                RunBatch(batch, options, remaining, Path.Combine(workDirectory, $"testgroups-{b + 1:D3}.json"), label, errors, probes, ref resetsPassed);
+                RunBatch(batch, options, remaining, Path.Combine(workDirectory, $"testgroups-{b + 1:D3}.json"), label, errors, probes,
+                    ref resetsPassed, ref invocations);
             }
         }
         finally
@@ -229,7 +238,7 @@ public sealed class AlToolTestRunner
             Log.Info($"[{index}/{states.Count}] Codeunit {codeunit.CodeunitId} {codeunit.Name}{status}: {state.Result.Passed} passed, " +
                      $"{state.Result.Failed} failed, {state.Result.Skipped} skipped ({state.Result.DurationSeconds:0.0}s)");
         }
-        return new AlToolRun(result, errors, probes) { StateResetsPassed = resetsPassed };
+        return new AlToolRun(result, errors, probes) { StateResetsPassed = resetsPassed, Invocations = invocations };
     }
 
     /// <summary>The test groups for the given codeunits (codeunits without an enabled method are left out).</summary>
@@ -311,17 +320,18 @@ public sealed class AlToolTestRunner
 
     /// <summary>
     /// A warning when the login hook of the BcDevEnv Test Runner (ApplicationArea('') in every client session that opens
-    /// a company during the run) cleared the application area in fewer sessions than <paramref name="resetsPassed"/>:
-    /// the AL tool runs every state reset in a session of its own, so each passed reset should have been counted.
-    /// Null when it was not fewer, or when the runner app has no login hook (<see cref="NavTestService.StateResetSummary.LoginSessions"/> null).
+    /// a company during the run) cleared the application area in fewer sessions than <paramref name="alToolInvocations"/>,
+    /// the AL tool processes that reported test results: each of them was observed to log in once. Null when it was not
+    /// fewer, or when the runner app has no login hook
+    /// (<see cref="NavTestService.StateResetSummary.LoginSessions"/> null).
     /// </summary>
-    public static string? LoginApplicationAreaWarning(NavTestService.StateResetSummary summary, int resetsPassed)
+    public static string? LoginApplicationAreaWarning(NavTestService.StateResetSummary summary, int alToolInvocations)
     {
-        if (summary.LoginSessions is not { } sessions || sessions >= resetsPassed)
+        if (summary.LoginSessions is not { } sessions || sessions >= alToolInvocations)
             return null;
-        return $"State reset: the login ApplicationArea was cleared in only {sessions} session(s), fewer than the {resetsPassed} passed " +
-               "state reset(s), which each ran in a session of their own; test codeunits may have run with the application area of " +
-               "\"Application Area Setup\" (controls outside it are \"not found on the page\").";
+        return $"State reset: the login ApplicationArea was cleared in only {sessions} session(s), fewer than the {alToolInvocations} " +
+               "AL tool invocation(s) that reported results, which each log in once; test codeunits may have run with the application " +
+               "area of \"Application Area Setup\" (controls outside it are \"not found on the page\").";
     }
 
     /// <summary>The state reset codeunit for the permissions mock setting (TestPermissions unknown).</summary>
@@ -366,10 +376,10 @@ public sealed class AlToolTestRunner
 
     /// <summary>
     /// The groups with a state reset before each of them ([reset 01, g1, reset 02, g2, ...]). The AL tool runs
-    /// the groups in order, each in a new session, and does not merge repeated codeunits; the server rejects a
-    /// repeated codeunit/method pair, so every reset selects its own method of the reset codeunit. With
-    /// <paramref name="stateProbe"/>, the diagnostic state probe runs once, right after the first reset
-    /// ([reset 01, probe, g1, reset 02, g2, ...]).
+    /// the groups in order and does not merge repeated codeunits; the server rejects a repeated codeunit/method
+    /// pair, so every reset selects its own method of the reset codeunit. With <paramref name="stateProbe"/>, the
+    /// diagnostic state probe runs once, first ([probe, reset 01, g1, reset 02, g2, ...]), so that the first reset
+    /// clears its error (the last error carries over to the next group).
     /// </summary>
     public static IReadOnlyList<TestGroup> WithStateResets(IEnumerable<TestGroup> groups, int resetCodeunitId, bool stateProbe = false)
     {
@@ -392,11 +402,11 @@ public sealed class AlToolTestRunner
         if (invalid.Count > 0)
             throw new ArgumentException($"Not a state reset codeunit: {string.Join(", ", invalid)}.", nameof(resetCodeunitIds));
         var result = new List<TestGroup>(groups.Count * 2 + 1);
+        if (stateProbe && groups.Count > 0)
+            result.Add(new TestGroup(StateProbeCodeunitId, new[] { StateProbeMethodName }));
         for (var i = 0; i < groups.Count; i++)
         {
             result.Add(new TestGroup(resetCodeunitIds[i], new[] { ResetMethodName(i + 1) }));
-            if (i == 0 && stateProbe)
-                result.Add(new TestGroup(StateProbeCodeunitId, new[] { StateProbeMethodName }));
             result.Add(groups[i]);
         }
         return result;
@@ -419,7 +429,7 @@ public sealed class AlToolTestRunner
         m.Outcome == TestOutcome.Failed && m.Message?.StartsWith(TestSkipReasons.NotExecutedPrefix, StringComparison.Ordinal) == true;
 
     private void RunBatch(List<CodeunitState> batch, Options options, TimeSpan timeout, string groupsFile, string label, List<string> errors, List<string> probes,
-        ref int resetsPassed)
+        ref int resetsPassed, ref int invocations)
     {
         var resetIds = batch.Select(s => s.ResetCodeunitId).ToList();
         File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!).ToList(), resetIds, options.StateProbe)));
@@ -479,6 +489,9 @@ public sealed class AlToolTestRunner
                             $"{(code != null ? ", " + code : "")}): {FirstLine(message)}", errors);
                 return;
             }
+            // Something ran, so the AL tool logged in (once per process, as observed).
+            if (results.GetArrayLength() > 0)
+                invocations++;
 
             var count = 0;
             var resets = new HashSet<int>();

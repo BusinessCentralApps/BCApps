@@ -1383,8 +1383,8 @@ exit 1
     PermissionsMock (altool executor only): the state reset that runs before every test codeunit starts
     the permissions mock (true / on; without assignments for codeunits whose TestPermissions is Disabled,
     otherwise with the D365 Full Access base of codeunit 130302) or stops it (false / off).
-    StateProbe (altool executor only, diagnostic): true / on runs the BcDevEnv State Probe after the
-    first state reset of every AL tool batch and logs its message; false / off (default) does not.
+    StateProbe (altool executor only, diagnostic): true / on runs the BcDevEnv State Probe first in every
+    AL tool batch, before its first state reset, and logs its message; false / off (default) does not.
 #>
 function Get-BcDevEnvTestExecutorSettings {
     param(

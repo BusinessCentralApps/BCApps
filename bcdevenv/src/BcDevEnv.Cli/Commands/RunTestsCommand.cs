@@ -193,7 +193,7 @@ public static class RunTestsCommand
             {
                 var prepared = service.Prepare(options);
                 var alToolRun = alTool.Run(prepared, alToolOptions);
-                LogStateResetSummary(service, options, alToolRun.StateResetsPassed);
+                LogStateResetSummary(service, options, alToolRun.StateResetsPassed, alToolRun.Invocations);
                 return new Collected(alToolRun.Result, alToolRun.RunnerErrors);
             }
             finally
@@ -231,9 +231,10 @@ public static class RunTestsCommand
         }
     }
 
-    // What the passed state resets committed (the "Application Area Setup" restores); informational, a missing
-    // GetStateResetSummary action (an older BcDevEnv Test Runner app) is only a warning.
-    private static void LogStateResetSummary(NavTestService service, NavTestService.RunOptions options, int resetsPassed)
+    // What the passed state resets committed (the "Application Area Setup" restores) and in how many sessions the login
+    // hook cleared the application area (compared with the AL tool invocations, which each log in once); informational, a
+    // missing GetStateResetSummary action (an older BcDevEnv Test Runner app) is only a warning.
+    private static void LogStateResetSummary(NavTestService service, NavTestService.RunOptions options, int resetsPassed, int alToolInvocations)
     {
         if (resetsPassed == 0) return;
         NavTestService.StateResetSummary summary;
@@ -250,7 +251,7 @@ public static class RunTestsCommand
         var (info, warning) = AlToolTestRunner.StateResetSummaryMessages(summary, resetsPassed);
         Log.Info(info);
         if (warning != null) Log.Warn(warning);
-        if (AlToolTestRunner.LoginApplicationAreaWarning(summary, resetsPassed) is { } loginWarning) Log.Warn(loginWarning);
+        if (AlToolTestRunner.LoginApplicationAreaWarning(summary, alToolInvocations) is { } loginWarning) Log.Warn(loginWarning);
     }
 
     public const string ODataExecutor = "odata";
@@ -293,7 +294,7 @@ public static class RunTestsCommand
         };
     }
 
-    /// <summary>--state-probe: off (default) or on (diagnostic: log the state a test codeunit starts with, after the first reset of every batch).</summary>
+    /// <summary>--state-probe: off (default) or on (diagnostic: log the state at the start of every batch, before its first reset).</summary>
     public static bool ParseStateProbe(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return false;

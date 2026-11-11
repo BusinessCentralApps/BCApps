@@ -1,10 +1,10 @@
 // Restores table 9178 "Application Area Setup" (Base Application) to the rows it had before the first test ran.
-// 'bcdevenv run-tests --executor altool' runs every test codeunit in a new session, whose application area is
-// computed at login from this table: a row that a test commits (a codeunit with RequiredTestIsolation = Disabled,
-// e.g. "APIV1 - Employees E2E" enabling the Basic HR experience) would otherwise hide the Basic and Suite controls
-// from every later test codeunit, and code that reads the table would see it. The login hook (codeunit 50109) clears
-// the session's application area since, but not the table. The state reset (codeunit 50102) restores it before every
-// test codeunit and commits.
+// The Base Application computes a session's application area at login from this table, and every AL tool
+// invocation of 'bcdevenv run-tests --executor altool' (one batch of test codeunits) logs in: a row that a test
+// commits (a codeunit with RequiredTestIsolation = Disabled, e.g. "APIV1 - Employees E2E" enabling the Basic HR
+// experience) would otherwise hide the Basic and Suite controls from the test codeunits of every later batch, and
+// code that reads the table would see it. The login hook (codeunit 50109) clears the session's application area
+// at login, but not the table. The state reset (codeunit 50102) restores it before every test codeunit and commits.
 //
 // The baseline is captured once per database (PrepareTests, or the first state reset when PrepareTests did not
 // run) and stored in isolated storage (module scope, so every session, company and user sees it). It has all

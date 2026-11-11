@@ -101,9 +101,9 @@ $permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started; with the 
 if ($plan.Action -eq 'Test') {
     if ($executor.Executor -eq 'altool') {
         Write-Host "Test executor: altool - AL tool $($executor.AlToolVersion) runtests (client session, development endpoint port $devPort), $($executor.AppTimeoutMinutes) min per test app and pass; the BcDevEnvTestRunner selects the tests"
-        Write-Host "State reset:   before every test codeunit (BcDevEnv Test Runner) - restores Application Area Setup and commits; permissions mock $permissionsMockLabel; the login ApplicationArea of every test session is cleared while the run is active"
+        Write-Host "State reset:   before every test codeunit (BcDevEnv Test Runner) - restores Application Area Setup and commits, clears the last error; permissions mock $permissionsMockLabel; the login ApplicationArea of every AL tool session (one login per batch) is cleared while the run is active"
         if ($executor.StateProbe) {
-            Write-Host "State probe:   on (diagnostic) - the BcDevEnv State Probe runs after the first state reset of every AL tool batch; its message is logged as 'State probe: ...' and is not a test result"
+            Write-Host "State probe:   on (diagnostic) - the BcDevEnv State Probe runs first in every AL tool batch, before its first state reset; its message is logged as 'State probe: ...' and is not a test result"
         }
     }
     else {

@@ -1,9 +1,9 @@
 // Injected by 'bcdevenv run-tests --executor altool' before every test codeunit whose TestPermissions is
-// not Disabled (--permissions-mock on, the default): restores the cross-session test state (codeunit
-// 50102: "Application Area Setup"), starts the permissions mock and runs codeunit 130302 "Set State Test
-// Run" when it is installed, which assigns the D365 Full Access base the Test Runner gives such test
-// methods. Never selected as a test itself (the BcDevEnv Test Runner removes it from every suite) and left
-// out of the results.
+// not Disabled (--permissions-mock on, the default): resets the test state that carries over between test
+// codeunits (codeunit 50102: "Application Area Setup", the last error), starts the permissions mock and runs
+// codeunit 130302 "Set State Test Run" when it is installed, which assigns the D365 Full Access base the Test
+// Runner gives such test methods. Never selected as a test itself (the BcDevEnv Test Runner removes it from
+// every suite) and left out of the results.
 //
 // RequiredTestIsolation = Disabled so that the server commits the restore; the server applies it to this
 // codeunit only, the next test codeunit runs with its own RequiredTestIsolation.
