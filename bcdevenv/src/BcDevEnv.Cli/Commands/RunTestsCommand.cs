@@ -191,12 +191,34 @@ public static class RunTestsCommand
                      $"{alToolOptions.ServerInstance}, {alToolOptions.Authentication} authentication). The BcDevEnvTestRunner selects the tests.");
             var prepared = service.Prepare(options);
             var alToolRun = alTool.Run(prepared, alToolOptions);
+            LogStateResetSummary(service, options, alToolRun.StateResetsPassed);
             return new Collected(alToolRun.Result, alToolRun.RunnerErrors);
         }
 
         Log.Info($"Executor: odata ({options.ServiceName} RunCodeunit, one call per codeunit).");
         var perCodeunitRun = service.RunPerCodeunit(options);
         return new Collected(perCodeunitRun.Result, perCodeunitRun.RunnerErrors);
+    }
+
+    // What the passed state resets committed (the "Application Area Setup" restores); informational, a missing
+    // GetStateResetSummary action (an older BcDevEnv Test Runner app) is only a warning.
+    private static void LogStateResetSummary(NavTestService service, NavTestService.RunOptions options, int resetsPassed)
+    {
+        if (resetsPassed == 0) return;
+        NavTestService.StateResetSummary summary;
+        try
+        {
+            summary = service.GetStateResetSummary(options);
+        }
+        catch (BcDevEnvException ex)
+        {
+            Log.Warn($"State reset: could not read the state reset summary ({NavTestService.GetStateResetSummaryAction}); " +
+                     $"is the current BcDevEnv Test Runner app installed? {ex.Message}");
+            return;
+        }
+        var (info, warning) = AlToolTestRunner.StateResetSummaryMessages(summary, resetsPassed);
+        Log.Info(info);
+        if (warning != null) Log.Warn(warning);
     }
 
     public const string ODataExecutor = "odata";
@@ -239,7 +261,7 @@ public static class RunTestsCommand
         };
     }
 
-    /// <summary>--state-probe: off (default) or on (diagnostic: log the session state after the first reset of every batch).</summary>
+    /// <summary>--state-probe: off (default) or on (diagnostic: log the state a test codeunit starts with, after the first reset of every batch).</summary>
     public static bool ParseStateProbe(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return false;

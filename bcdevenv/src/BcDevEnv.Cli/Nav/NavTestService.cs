@@ -108,6 +108,24 @@ public sealed class NavTestService
     public const string PrepareAction = "PrepareTests";
     public const string RunCodeunitAction = "RunCodeunit";
     public const string GetCodeunitResultsAction = "GetCodeunitResults";
+    public const string GetStateResetSummaryAction = "GetStateResetSummary";
+
+    /// <summary>
+    /// What the AL tool executor's state resets did since the last PrepareTests (GetStateResetSummary):
+    /// <see cref="Resets"/> committed resets, <see cref="Restores"/> of them changed "Application Area Setup"
+    /// (rows <see cref="Removed"/>, <see cref="Recreated"/>, <see cref="Modified"/>) back to its baseline of
+    /// <see cref="BaselineRows"/> rows (-1: no baseline; <see cref="TablePresent"/> false: no such table).
+    /// </summary>
+    public sealed record StateResetSummary
+    {
+        public bool TablePresent { get; init; }
+        public int BaselineRows { get; init; } = -1;
+        public int Resets { get; init; }
+        public int Restores { get; init; }
+        public int Removed { get; init; }
+        public int Recreated { get; init; }
+        public int Modified { get; init; }
+    }
 
     private readonly HttpMessageHandler? _handler;
 
@@ -248,6 +266,31 @@ public sealed class NavTestService
         Log.Info($"Prepared test suite '{plan.TestSuite}' (runner {plan.TestRunnerId}): {plan.Codeunits.Count} codeunit(s), " +
                  $"{plan.Functions} test method(s), {plan.DisabledFunctions} disabled before execution.");
         return plan;
+    }
+
+    /// <summary>
+    /// Reads what the AL tool executor's state resets did since the last PrepareTests (GetStateResetSummary of the
+    /// BcDevEnv Test Runner). Throws <see cref="BcDevEnvException"/> when the action fails or is missing (an older app).
+    /// </summary>
+    public StateResetSummary GetStateResetSummary(RunOptions options)
+    {
+        using var client = CreateClient(options);
+        return ParseStateResetSummary(Post(client, BuildActionUrl(options, GetStateResetSummaryAction), "{}", options));
+    }
+
+    /// <summary>Parses the JSON returned by GetStateResetSummary.</summary>
+    public static StateResetSummary ParseStateResetSummary(string json)
+    {
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<StateResetSummary>(json,
+                       new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                   ?? throw new BcDevEnvException("GetStateResetSummary returned no summary.");
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new BcDevEnvException($"Could not parse the GetStateResetSummary response: {ex.Message}\n{json}", ex);
+        }
     }
 
     /// <summary>A one-method failed result standing for a codeunit whose results are unavailable.</summary>

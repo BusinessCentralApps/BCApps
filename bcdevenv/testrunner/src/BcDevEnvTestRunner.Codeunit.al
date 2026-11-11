@@ -11,6 +11,8 @@
 //                                      and the disabled tests BEFORE anything runs), then run one
 //                                      codeunit per call so a hung/failed call only loses that
 //                                      codeunit and progress can be reported.
+// PrepareTests also starts a test run for the AL tool executor's state resets (codeunit 50102), which
+// GetStateResetSummary reports on afterwards.
 //
 // All action parameters are Text (the type proven to round-trip over OData); numeric values are
 // parsed inside the procedures.
@@ -79,6 +81,7 @@ codeunit 50100 "BcDevEnv Test Runner"
         ALTestSuite: Record "AL Test Suite";
         TestSuiteMgt: Codeunit "Test Suite Mgt.";
         TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture";
+        AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
         DisabledMethods: Dictionary of [Text, List of [Text]];
         SuiteName: Code[10];
         TestTypeValue: Integer;
@@ -109,6 +112,8 @@ codeunit 50100 "BcDevEnv Test Runner"
 
         ExcludeStateResetCodeunits(SuiteName);
         ApplyDisabledTests(SuiteName, DisabledMethods);
+        // The baseline that the state reset restores "Application Area Setup" to (captured once, before any test).
+        AppAreaSetupReset.StartRun();
         Commit();
 
         ALTestSuite.Get(SuiteName);
@@ -155,6 +160,19 @@ codeunit 50100 "BcDevEnv Test Runner"
         SuiteName := GetSuiteName(testSuite);
         LineNo := ParseInteger(codeunitLineNo, 'codeunitLineNo');
         exit(BuildCodeunitXUnit(SuiteName, LineNo, ''));
+    end;
+
+    /// <summary>
+    /// Returns what the state resets of 'bcdevenv run-tests --executor altool' (codeunit 50102) did since the last
+    /// PrepareTests, as JSON: tablePresent ("Application Area Setup" exists), baselineRows (-1 without a baseline),
+    /// resets (committed state resets), restores (resets that changed the table), removed, recreated and modified (rows).
+    /// The counters are written by every reset, so they show that the resets were committed.
+    /// </summary>
+    procedure GetStateResetSummary(): Text
+    var
+        AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
+    begin
+        exit(AppAreaSetupReset.GetSummaryJson());
     end;
 
     local procedure GetSuiteName(TestSuite: Text): Code[10]

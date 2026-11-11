@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -550,6 +551,8 @@ public class AlToolExecutorTests
 
         Assert.Matches($@"codeunit {codeunitId} ""[^""]+""", source);
         Assert.Contains("Subtype = Test;", source);
+        // The server commits the reset (the "Application Area Setup" restore) only without test isolation.
+        Assert.Contains("RequiredTestIsolation = Disabled;", source);
         var methods = Regex.Matches(source, @"\[Test\]\s+procedure (\w+)\(\)").Select(m => m.Groups[1].Value).ToList();
         Assert.Equal(Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName), methods);
         Assert.Equal(AlToolTestRunner.ResetMethodCount, Regex.Matches(source, @"procedure \w+\(\)").Count(m => m.Value.Contains(AlToolTestRunner.ResetMethodPrefix)));
@@ -564,6 +567,64 @@ public class AlToolExecutorTests
 
         Assert.Contains("reported no test results", Assert.Single(run.RunnerErrors));
         Assert.Equal(1, run.Result.Failed);
+    }
+
+    [Fact]
+    public void Passed_state_resets_are_counted_once_per_codeunit()
+    {
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(Prepared(50001, "A", true, Pending("T")), Prepared(50002, "B", true, Pending("T")), Prepared(50003, "C", true, Pending("T")));
+
+        Assert.Equal(3, new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: 2) with { StateProbe = true }).StateResetsPassed);
+
+        // OnRun, a reset codeunit that was not chosen for the position and a failed reset do not count.
+        const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
+        var partly = new FakeAlTool((_, _) => FakeAlTool.Results(
+            (reset, "OnRun", "passed", null),
+            (reset, AlToolTestRunner.ResetMethodName(1), "passed", null),
+            (50001, "T", "passed", null),
+            (AlToolTestRunner.ResetFullAccessCodeunitId, AlToolTestRunner.ResetMethodName(2), "passed", null),
+            (50002, "T", "passed", null),
+            (reset, AlToolTestRunner.ResetMethodName(3), "failed", "boom"),
+            (50003, "T", "passed", null)), autoResets: false);
+        var run = new AlToolTestRunner(partly.Execute).Run(suite, Options());
+
+        Assert.Equal(1, run.StateResetsPassed);
+        Assert.Equal(2, run.RunnerErrors.Count);
+    }
+
+    [Fact]
+    public void The_state_reset_summary_is_parsed_from_the_runner_response()
+    {
+        var summary = NavTestService.ParseStateResetSummary(NavTestService.ExtractXml(
+            """{"@odata.context":"x","value":"{\"tablePresent\":true,\"baselineRows\":0,\"resets\":41,\"restores\":2,\"removed\":2,\"recreated\":0,\"modified\":0}"}"""));
+
+        Assert.Equal(new NavTestService.StateResetSummary { TablePresent = true, BaselineRows = 0, Resets = 41, Restores = 2, Removed = 2 }, summary);
+        Assert.Equal(-1, NavTestService.ParseStateResetSummary("{}").BaselineRows);
+        Assert.Throws<BcDevEnvException>(() => NavTestService.ParseStateResetSummary("not json"));
+        Assert.Throws<BcDevEnvException>(() => NavTestService.ParseStateResetSummary("null"));
+    }
+
+    [Fact]
+    public void The_state_reset_summary_warns_when_passed_resets_were_not_committed()
+    {
+        var restored = new NavTestService.StateResetSummary { TablePresent = true, BaselineRows = 0, Resets = 41, Restores = 2, Removed = 2 };
+
+        var (info, warning) = AlToolTestRunner.StateResetSummaryMessages(restored, 41);
+        Assert.Equal("State reset: 41 state reset(s) committed (41 passed); \"Application Area Setup\" (baseline 0 row(s)) restored by 2 of them: " +
+                     "2 row(s) removed, 0 re-created, 0 modified.", info);
+        Assert.Null(warning);
+
+        // A reset that failed after its restore was committed counts as committed, not as passed.
+        Assert.Null(AlToolTestRunner.StateResetSummaryMessages(restored, 40).Warning);
+
+        // Resets that passed but whose changes the server rolled back.
+        var (_, rolledBack) = AlToolTestRunner.StateResetSummaryMessages(restored with { Resets = 0, Restores = 0, Removed = 0 }, 41);
+        Assert.Contains("only 0 of 41 passed state reset(s) were committed", rolledBack);
+
+        var (noTable, none) = AlToolTestRunner.StateResetSummaryMessages(new NavTestService.StateResetSummary { Resets = 3 }, 3);
+        Assert.Equal("State reset: 3 state reset(s) committed (3 passed); there is no \"Application Area Setup\" table to restore.", noTable);
+        Assert.Null(none);
     }
 
     [Fact]
@@ -855,7 +916,7 @@ public class AlToolExecutorTests
             "--test-type", "UnitTest", "--required-test-isolation", "Disabled", "--result-file", output);
 
         Assert.Equal(0, exit);
-        Assert.Equal(new[] { "PrepareTests", "GetCodeunitResults" }, runner.Requests.Select(r => r.Action));
+        Assert.Equal(new[] { "PrepareTests", "GetCodeunitResults", "GetStateResetSummary" }, runner.Requests.Select(r => r.Action));
         var call = Assert.Single(tool.Calls);
         Assert.Equal("my-dotnet", call.FileName);
         Assert.Equal("17049", call.Arguments[call.Arguments.ToList().IndexOf("--port") + 1]);
@@ -945,10 +1006,32 @@ public class AlToolExecutorTests
             (AlToolTestRunner.ResetMockStartedCodeunitId, AlToolTestRunner.ResetMethodName(1), "failed", "boom"),
             (50001, "A", "passed", null)), autoResets: false);
         var output = Path.Combine(dir.Path, "j.xml");
+        var runner = WithPrepare(plan, template);
 
-        Assert.Equal(1, RunCommand(WithPrepare(plan, template), tool, "--executor", "altool", "--altool", alTool,
+        Assert.Equal(1, RunCommand(runner, tool, "--executor", "altool", "--altool", alTool,
             "--allow-failures", "--result-file", output));
         Assert.Single(XDocument.Load(output).Descendants("testcase"));
+        Assert.DoesNotContain(runner.Requests, r => r.Action == NavTestService.GetStateResetSummaryAction);
+    }
+
+    [Fact]
+    public void Command_with_altool_executor_reads_the_state_reset_summary_and_a_missing_one_is_only_a_warning()
+    {
+        using var dir = new TempDir();
+        var alTool = dir.Write("altool.dll", "");
+        var plan = FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0));
+        var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results((50001, "A", "passed", null)));
+        var current = WithPrepare(plan, template, """{"tablePresent":true,"baselineRows":0,"resets":1,"restores":1,"removed":1,"recreated":0,"modified":0}""");
+        var old = WithPrepare(plan, template);
+
+        Assert.Equal(0, RunCommand(current, tool, "--executor", "altool", "--altool", alTool, "--result-file", Path.Combine(dir.Path, "a.xml")));
+        Assert.Equal(0, RunCommand(old, tool, "--executor", "altool", "--altool", alTool, "--result-file", Path.Combine(dir.Path, "b.xml")));
+
+        Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.GetCodeunitResultsAction, NavTestService.GetStateResetSummaryAction },
+            current.Requests.Select(r => r.Action));
+        Assert.Equal(NavTestService.GetStateResetSummaryAction, old.Requests.Last().Action);
+        Assert.Single(XDocument.Load(Path.Combine(dir.Path, "b.xml")).Descendants("testcase"));
     }
 
     [Fact]
@@ -1039,12 +1122,16 @@ public class AlToolExecutorTests
             new NavTestService(handler), new AlToolTestRunner(tool.Execute));
     }
 
-    // PrepareTests returns the plan, GetCodeunitResults the template; RunCodeunit must not be called.
-    private static FakeRunnerHandler WithPrepare(string planJson, string templateXml) =>
+    // PrepareTests returns the plan, GetCodeunitResults the template and GetStateResetSummary the summary (without one
+    // a 404, as from an older BcDevEnv Test Runner app); RunCodeunit must not be called.
+    private static FakeRunnerHandler WithPrepare(string planJson, string templateXml, string? summaryJson = null) =>
         new((action, _) => action switch
         {
             NavTestService.PrepareAction => FakeRunnerHandler.Value(planJson),
             "GetCodeunitResults" => FakeRunnerHandler.Value(templateXml),
+            NavTestService.GetStateResetSummaryAction => summaryJson != null
+                ? FakeRunnerHandler.Value(summaryJson)
+                : FakeRunnerHandler.Error(HttpStatusCode.NotFound, "No HTTP resource was found that matches the request URI."),
             _ => throw new InvalidOperationException($"Unexpected {action}"),
         });
 }

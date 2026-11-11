@@ -1,6 +1,10 @@
 // Injected by 'bcdevenv run-tests --executor altool --permissions-mock off' before every test codeunit:
-// resets the session and stops the permissions mock. Never selected as a test itself (the BcDevEnv Test
-// Runner removes it from every suite) and left out of the results.
+// restores the cross-session test state (codeunit 50102: "Application Area Setup") and stops the
+// permissions mock. Never selected as a test itself (the BcDevEnv Test Runner removes it from every suite)
+// and left out of the results.
+//
+// RequiredTestIsolation = Disabled so that the server commits the restore; the server applies it to this
+// codeunit only, the next test codeunit runs with its own RequiredTestIsolation.
 //
 // The server rejects a test method that occurs twice in one runtests call ("Test case name ... is not
 // unique"), so the n-th reset of a batch runs method ResetTestState<nn> (01..50, all identical). The
@@ -11,6 +15,7 @@ codeunit 50104 "BcDevEnv Reset Mock Stopped"
 {
     Subtype = Test;
     TestPermissions = Disabled;
+    RequiredTestIsolation = Disabled;
 
     [Test]
     procedure ResetTestState01()

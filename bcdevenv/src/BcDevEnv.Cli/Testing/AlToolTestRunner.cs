@@ -23,17 +23,21 @@ namespace BcDevEnv.Cli.Testing;
 /// process that cannot start, times out, or does not print a parseable JSON result with data is an
 /// infrastructure error; failed tests alone are not (the AL tool exits 1 for them).</para>
 ///
-/// <para>The server's development test runner raises none of the Test Runner's per-test events, so a
-/// state reset codeunit of the BcDevEnv Test Runner app is run before every test codeunit of every batch:
-/// <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
+/// <para>The server's development test runner raises none of the Test Runner's per-test events and runs every
+/// test codeunit in a new session, so session state (application area, work date, last error) starts fresh in
+/// every codeunit. A state reset codeunit of the BcDevEnv Test Runner app runs before every test codeunit of
+/// every batch for the state that outlives a session: it restores "Application Area Setup" to the baseline of
+/// PrepareTests and commits it (the reset codeunits have RequiredTestIsolation = Disabled), and it sets up the
+/// permissions mock: <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
 /// <see cref="ResetMockStartedCodeunitId"/> for codeunits whose TestPermissions is Disabled (or unknown) and
 /// <see cref="ResetFullAccessCodeunitId"/> (the D365 Full Access base of codeunit 130302, as the Test Runner
 /// sets it for such methods) for all others. Its results are not test results; a reset that fails or is not
-/// reported is an infrastructure error.</para>
+/// reported is an infrastructure error. <see cref="StateResetSummaryMessages"/> compares the passed resets with
+/// the committed ones that the BcDevEnv Test Runner counted.</para>
 ///
 /// <para>Diagnostic only: with <see cref="Options.StateProbe"/>, the state probe codeunit
 /// (<see cref="StateProbeCodeunitId"/>) runs once per batch, right after the first state reset. It always
-/// fails; its message (the session state the first codeunit starts with) is logged as "State probe: ..."
+/// fails; its message (the state a test codeunit starts with) is logged as "State probe: ..."
 /// and is neither a test result nor an infrastructure error.</para>
 /// </summary>
 public sealed class AlToolTestRunner
@@ -88,7 +92,14 @@ public sealed class AlToolTestRunner
     /// Merged results (every prepared codeunit, in plan order), infrastructure errors and the state probe
     /// messages (one per batch that reported its probe; empty unless <see cref="Options.StateProbe"/>).
     /// </summary>
-    public sealed record AlToolRun(TestRunResult Result, IReadOnlyList<string> RunnerErrors, IReadOnlyList<string> StateProbes);
+    public sealed record AlToolRun(TestRunResult Result, IReadOnlyList<string> RunnerErrors, IReadOnlyList<string> StateProbes)
+    {
+        /// <summary>
+        /// State resets that the AL tool reported as passed, one per test codeunit at most. Each should have committed
+        /// its changes (compare <see cref="NavTestService.StateResetSummary.Resets"/>).
+        /// </summary>
+        public int StateResetsPassed { get; init; }
+    }
 
     /// <summary>One entry of the <c>--testgroups</c> file; an empty method list runs every method.</summary>
     public sealed record TestGroup(int CodeunitId, IReadOnlyList<string> TestMethods);
@@ -176,6 +187,7 @@ public sealed class AlToolTestRunner
 
         var workDirectory = options.WorkDirectory ?? Path.Combine(Path.GetTempPath(), "bcdevenv-altool-" + Guid.NewGuid().ToString("N"));
         var ownWorkDirectory = options.WorkDirectory == null;
+        var resetsPassed = 0;
         Directory.CreateDirectory(workDirectory);
         try
         {
@@ -190,7 +202,7 @@ public sealed class AlToolTestRunner
                     Fail(batch, error, errors);
                     continue;
                 }
-                RunBatch(batch, options, remaining, Path.Combine(workDirectory, $"testgroups-{b + 1:D3}.json"), label, errors, probes);
+                RunBatch(batch, options, remaining, Path.Combine(workDirectory, $"testgroups-{b + 1:D3}.json"), label, errors, probes, ref resetsPassed);
             }
         }
         finally
@@ -214,7 +226,7 @@ public sealed class AlToolTestRunner
             Log.Info($"[{index}/{states.Count}] Codeunit {codeunit.CodeunitId} {codeunit.Name}{status}: {state.Result.Passed} passed, " +
                      $"{state.Result.Failed} failed, {state.Result.Skipped} skipped ({state.Result.DurationSeconds:0.0}s)");
         }
-        return new AlToolRun(result, errors, probes);
+        return new AlToolRun(result, errors, probes) { StateResetsPassed = resetsPassed };
     }
 
     /// <summary>The test groups for the given codeunits (codeunits without an enabled method are left out).</summary>
@@ -268,6 +280,28 @@ public sealed class AlToolTestRunner
     /// <summary>Serialises test groups as the AL tool's <c>--testgroups</c> JSON.</summary>
     public static string SerializeTestGroups(IEnumerable<TestGroup> groups) => JsonSerializer.Serialize(groups, GroupJson);
 
+    /// <summary>
+    /// The log line for what the state resets of a run did (GetStateResetSummary of the BcDevEnv Test Runner) after
+    /// <paramref name="resetsPassed"/> passed state resets, and a warning when fewer resets were committed than passed:
+    /// the others were rolled back, including their "Application Area Setup" restore.
+    /// </summary>
+    public static (string Info, string? Warning) StateResetSummaryMessages(NavTestService.StateResetSummary summary, int resetsPassed)
+    {
+        var committed = $"State reset: {summary.Resets} state reset(s) committed ({resetsPassed} passed)";
+        var info = !summary.TablePresent
+            ? $"{committed}; there is no \"Application Area Setup\" table to restore."
+            : summary.BaselineRows < 0
+                ? $"{committed}; \"Application Area Setup\" has no baseline, nothing was restored."
+                : $"{committed}; \"Application Area Setup\" (baseline {summary.BaselineRows} row(s)) restored by {summary.Restores} of them: " +
+                  $"{summary.Removed} row(s) removed, {summary.Recreated} re-created, {summary.Modified} modified.";
+        string? warning = null;
+        if (summary.Resets < resetsPassed)
+            warning = $"State reset: only {summary.Resets} of {resetsPassed} passed state reset(s) were committed; the others were rolled back, " +
+                      "including their \"Application Area Setup\" restore. Is the current BcDevEnv Test Runner app (reset codeunits with " +
+                      "RequiredTestIsolation = Disabled) installed?";
+        return (info, warning);
+    }
+
     /// <summary>The state reset codeunit for the permissions mock setting (TestPermissions unknown).</summary>
     public static int StateResetCodeunitId(bool permissionsMock) => StateResetCodeunitId(permissionsMock, null);
 
@@ -310,8 +344,8 @@ public sealed class AlToolTestRunner
 
     /// <summary>
     /// The groups with a state reset before each of them ([reset 01, g1, reset 02, g2, ...]). The AL tool runs
-    /// the groups in order, in one session, and does not merge repeated codeunits; the server rejects a repeated
-    /// codeunit/method pair, so every reset selects its own method of the reset codeunit. With
+    /// the groups in order, each in a new session, and does not merge repeated codeunits; the server rejects a
+    /// repeated codeunit/method pair, so every reset selects its own method of the reset codeunit. With
     /// <paramref name="stateProbe"/>, the diagnostic state probe runs once, right after the first reset
     /// ([reset 01, probe, g1, reset 02, g2, ...]).
     /// </summary>
@@ -362,7 +396,8 @@ public sealed class AlToolTestRunner
     private static bool IsNotExecuted(TestMethodResult m) =>
         m.Outcome == TestOutcome.Failed && m.Message?.StartsWith(TestSkipReasons.NotExecutedPrefix, StringComparison.Ordinal) == true;
 
-    private void RunBatch(List<CodeunitState> batch, Options options, TimeSpan timeout, string groupsFile, string label, List<string> errors, List<string> probes)
+    private void RunBatch(List<CodeunitState> batch, Options options, TimeSpan timeout, string groupsFile, string label, List<string> errors, List<string> probes,
+        ref int resetsPassed)
     {
         var resetIds = batch.Select(s => s.ResetCodeunitId).ToList();
         File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!).ToList(), resetIds, options.StateProbe)));
@@ -425,6 +460,7 @@ public sealed class AlToolTestRunner
 
             var count = 0;
             var resets = new HashSet<int>();
+            var passedResets = new HashSet<int>();
             var probed = false;
             var byId = batch.GroupBy(s => s.Prepared.Codeunit.CodeunitId).ToDictionary(g => g.Key, g => g.First());
             foreach (var item in results.EnumerateArray())
@@ -451,10 +487,15 @@ public sealed class AlToolTestRunner
                     // the reset codeunit chosen for that position.
                     var position = ResetMethodPosition(methodName);
                     if (position > batch.Count) position = 0;
-                    if (position > 0 && codeunitId == resetIds[position - 1]) resets.Add(position);
+                    var chosen = position > 0 && codeunitId == resetIds[position - 1];
+                    if (chosen) resets.Add(position);
                     var next = batch[Math.Min(position > 0 ? position : resets.Count + 1, batch.Count) - 1].Prepared.Codeunit;
                     var status = GetString(item, "status");
-                    if (!string.Equals(status?.Trim(), "passed", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(status?.Trim(), "passed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (chosen) passedResets.Add(position);
+                    }
+                    else
                     {
                         var error = $"{label}: the state reset before codeunit {next.CodeunitId} {next.Name} failed " +
                                     $"(codeunit {codeunitId} '{methodName}' {status ?? "without status"}): " +
@@ -473,6 +514,7 @@ public sealed class AlToolTestRunner
                 state.Merge(methodName, GetString(item, "status"), GetString(item, "output"),
                     item.TryGetProperty("durationMs", out var ms) && ms.TryGetDouble(out var d) ? d / 1000d : 0d);
             }
+            resetsPassed += passedResets.Count;
 
             if (count == 0)
             {

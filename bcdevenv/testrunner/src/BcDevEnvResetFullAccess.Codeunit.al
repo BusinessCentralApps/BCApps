@@ -1,8 +1,12 @@
 // Injected by 'bcdevenv run-tests --executor altool' before every test codeunit whose TestPermissions is
-// not Disabled (--permissions-mock on, the default): resets the session, starts the permissions mock and
-// runs codeunit 130302 "Set State Test Run" when it is installed, which assigns the D365 Full Access base
-// the Test Runner gives such test methods. Never selected as a test itself (the BcDevEnv Test Runner
-// removes it from every suite) and left out of the results.
+// not Disabled (--permissions-mock on, the default): restores the cross-session test state (codeunit
+// 50102: "Application Area Setup"), starts the permissions mock and runs codeunit 130302 "Set State Test
+// Run" when it is installed, which assigns the D365 Full Access base the Test Runner gives such test
+// methods. Never selected as a test itself (the BcDevEnv Test Runner removes it from every suite) and left
+// out of the results.
+//
+// RequiredTestIsolation = Disabled so that the server commits the restore; the server applies it to this
+// codeunit only, the next test codeunit runs with its own RequiredTestIsolation.
 //
 // The server rejects a test method that occurs twice in one runtests call ("Test case name ... is not
 // unique"), so the n-th reset of a batch runs method ResetTestState<nn> (01..50, all identical). The
@@ -13,6 +17,7 @@ codeunit 50106 "BcDevEnv Reset Full Access"
 {
     Subtype = Test;
     TestPermissions = Disabled;
+    RequiredTestIsolation = Disabled;
 
     [Test]
     procedure ResetTestState01()
