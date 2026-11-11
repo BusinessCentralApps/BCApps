@@ -86,8 +86,18 @@ public sealed class AlToolTestRunner
     /// <summary>BcDevEnv Test Runner codeunit "BcDevEnv Reset Mock Stopped" (state reset, permissions mock stopped).</summary>
     public const int ResetMockStoppedCodeunitId = 50104;
 
-    /// <summary>The test method of the state reset codeunits.</summary>
-    public const string ResetMethodName = "ResetTestState";
+    /// <summary>
+    /// The state reset codeunits have the identical test methods ResetTestState01..ResetTestState50: the server
+    /// rejects a test method that occurs twice in one runtests call ("Test case name ... is not unique"), so the
+    /// n-th reset of a batch runs method n. This count is therefore also the maximum batch size.
+    /// </summary>
+    public const int ResetMethodCount = 50;
+
+    /// <summary>The most codeunits per AL tool process (one state reset method each).</summary>
+    public const int MaxBatchSize = ResetMethodCount;
+
+    /// <summary>Name prefix of the state reset test methods (followed by the two-digit position).</summary>
+    public const string ResetMethodPrefix = "ResetTestState";
 
     private const string CallstackMarker = "AL Callstack:";
 
@@ -118,7 +128,7 @@ public sealed class AlToolTestRunner
             Log.Warn($"Codeunit {reset.Codeunit.CodeunitId} {reset.Codeunit.Name} is a BcDevEnv state reset codeunit, not a test; it is left out.");
         var states = suite.Codeunits.Where(c => !IsStateResetCodeunit(c.Codeunit.CodeunitId)).Select(c => new CodeunitState(c)).ToList();
         var runnable = states.Where(s => s.Prepared.TemplateAvailable && s.Prepared.Codeunit.Run && s.Group != null).ToList();
-        var batchSize = Math.Max(1, options.BatchSize);
+        var batchSize = Math.Clamp(options.BatchSize, 1, MaxBatchSize);
         var batches = runnable.Select((s, i) => (s, i)).GroupBy(x => x.i / batchSize, x => x.s).Select(g => g.ToList()).ToList();
         var deadline = _utcNow() + options.Timeout;
 
@@ -185,14 +195,35 @@ public sealed class AlToolTestRunner
     public static bool IsStateResetCodeunit(int codeunitId) =>
         codeunitId is ResetMockStartedCodeunitId or ResetMockStoppedCodeunitId;
 
+    /// <summary>The state reset method that runs before the <paramref name="position"/>-th codeunit of a batch (1-based).</summary>
+    public static string ResetMethodName(int position)
+    {
+        if (position < 1 || position > ResetMethodCount)
+            throw new ArgumentOutOfRangeException(nameof(position), position, $"The state reset codeunits have {ResetMethodCount} methods.");
+        return ResetMethodPrefix + position.ToString("D2", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The position of a state reset method (ResetTestState07 = 7); 0 for any other method name.</summary>
+    public static int ResetMethodPosition(string? methodName)
+    {
+        if (methodName == null || methodName.Length != ResetMethodPrefix.Length + 2 ||
+            !methodName.StartsWith(ResetMethodPrefix, StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(methodName.AsSpan(ResetMethodPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var position))
+            return 0;
+        return position is >= 1 and <= ResetMethodCount ? position : 0;
+    }
+
     /// <summary>
-    /// The groups with the state reset codeunit before each of them ([reset, g1, reset, g2, ...]). The AL
-    /// tool runs the groups in order, in one session, and does not merge repeated codeunits.
+    /// The groups with a state reset before each of them ([reset 01, g1, reset 02, g2, ...]). The AL tool runs
+    /// the groups in order, in one session, and does not merge repeated codeunits; the server rejects a repeated
+    /// codeunit/method pair, so every reset selects its own method of the reset codeunit.
     /// </summary>
     public static IReadOnlyList<TestGroup> WithStateResets(IEnumerable<TestGroup> groups, int resetCodeunitId)
     {
-        var reset = new TestGroup(resetCodeunitId, Array.Empty<string>());
-        return groups.SelectMany(g => new[] { reset, g }).ToList();
+        var list = groups.ToList();
+        if (list.Count > ResetMethodCount)
+            throw new ArgumentException($"A batch has at most {ResetMethodCount} codeunits (one state reset method each); got {list.Count}.", nameof(groups));
+        return list.SelectMany((g, i) => new[] { new TestGroup(resetCodeunitId, new[] { ResetMethodName(i + 1) }), g }).ToList();
     }
 
     // Empty method list = all methods (no method of the codeunit is disabled); otherwise the enabled
@@ -273,7 +304,7 @@ public sealed class AlToolTestRunner
             }
 
             var count = 0;
-            var resets = 0;
+            var resets = new HashSet<int>();
             var byId = batch.GroupBy(s => s.Prepared.Codeunit.CodeunitId).ToDictionary(g => g.Key, g => g.First());
             foreach (var item in results.EnumerateArray())
             {
@@ -281,9 +312,12 @@ public sealed class AlToolTestRunner
                 var methodName = GetString(item, "methodName") ?? "";
                 if (IsStateResetCodeunit(codeunitId))
                 {
-                    // The k-th reset runs before the k-th codeunit of the batch; it is not a test result.
-                    var next = batch[Math.Min(resets, batch.Count - 1)].Prepared.Codeunit;
-                    if (methodName.Equals(ResetMethodName, StringComparison.OrdinalIgnoreCase)) resets++;
+                    // ResetTestState<n> runs before the n-th codeunit of the batch; it is not a test result. Other
+                    // results of the reset codeunit (OnRun) precede the next reset method.
+                    var position = ResetMethodPosition(methodName);
+                    if (position > batch.Count) position = 0;
+                    if (position > 0) resets.Add(position);
+                    var next = batch[Math.Min(position > 0 ? position : resets.Count + 1, batch.Count) - 1].Prepared.Codeunit;
                     var status = GetString(item, "status");
                     if (!string.Equals(status?.Trim(), "passed", StringComparison.OrdinalIgnoreCase))
                     {
@@ -325,16 +359,18 @@ public sealed class AlToolTestRunner
                 }
                 Log.Warn(problem);
             }
-            if (resets < batch.Count)
+            var withoutReset = Enumerable.Range(1, batch.Count).Where(p => !resets.Contains(p)).Select(p => batch[p - 1].Prepared.Codeunit.CodeunitId).ToList();
+            if (withoutReset.Count > 0)
             {
-                var error = $"{label}: the AL tool reported {resets} of {batch.Count} state reset(s) (codeunit {resetId} {ResetMethodName}); " +
-                            "the codeunits without one ran without a clean state. Is the current BcDevEnv Test Runner app installed?";
+                var methods = batch.Count == 1 ? ResetMethodName(1) : $"{ResetMethodName(1)}..{ResetMethodName(batch.Count)}";
+                var error = $"{label}: the AL tool reported {resets.Count} of {batch.Count} state reset(s) (codeunit {resetId} {methods}); " +
+                            $"codeunit(s) {string.Join(", ", withoutReset)} ran without a clean state. Is the current BcDevEnv Test Runner app installed?";
                 Log.Error(error);
                 errors.Add(error);
             }
             foreach (var state in batch)
                 state.Complete("The AL tool reported no result for this test.");
-            Log.Info($"{label}: {count} result(s) (+{resets} state reset(s)), exit code {capture.ExitCode} ({elapsed.TotalSeconds:0.0}s).");
+            Log.Info($"{label}: {count} result(s) (+{resets.Count} state reset(s)), exit code {capture.ExitCode} ({elapsed.TotalSeconds:0.0}s).");
         }
     }
 

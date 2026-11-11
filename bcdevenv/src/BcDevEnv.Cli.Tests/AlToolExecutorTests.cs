@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using BcDevEnv.Cli.Cli;
 using BcDevEnv.Cli.Commands;
@@ -13,7 +14,8 @@ namespace BcDevEnv.Cli.Tests;
 /// <summary>
 /// Scripted stand-in for AL tool processes; records every call and its test groups file. The responder
 /// gets the test groups without the injected state resets; with <c>autoResets</c> (default) the fake
-/// reports a passed OnRun and ResetTestState for every injected reset, like the AL tool would.
+/// reports a passed OnRun and the requested ResetTestState&lt;nn&gt; method for every injected reset, like
+/// the AL tool would, and, like the server, fails a test case that repeats a codeunit/method pair of the run.
 /// </summary>
 internal sealed class FakeAlTool
 {
@@ -40,7 +42,8 @@ internal sealed class FakeAlTool
         return _autoResets ? WithResetResults(capture, all.Where(g => AlToolTestRunner.IsStateResetCodeunit(g.CodeunitId))) : capture;
     }
 
-    // Adds passed reset results in front of the reported results (when there is a result array).
+    // Adds the reset results in front of the reported results (when there is a result array). An empty method
+    // list runs every reset method; a codeunit/method pair that occurred before fails as on the server.
     private static ProcessCapture WithResetResults(ProcessCapture capture, IEnumerable<AlToolTestRunner.TestGroup> resets)
     {
         var start = capture.StdOut.IndexOf('{');
@@ -51,14 +54,36 @@ internal sealed class FakeAlTool
         catch (JsonException) { return capture; }
         if (root?["data"]?["results"] is not JsonArray results) return capture;
         var index = 0;
+        var seen = new HashSet<(int, string)>();
         foreach (var reset in resets)
-            foreach (var method in new[] { "OnRun", AlToolTestRunner.ResetMethodName })
+        {
+            var methods = reset.TestMethods.Count > 0
+                ? reset.TestMethods
+                : Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName).ToList();
+            foreach (var method in methods.Prepend("OnRun"))
+            {
+                var unique = seen.Add((reset.CodeunitId, method.ToUpperInvariant())) || method == "OnRun";
                 results.Insert(index++, new JsonObject
                 {
-                    ["codeunitId"] = reset.CodeunitId, ["methodName"] = method, ["status"] = "passed", ["output"] = "", ["durationMs"] = 5,
+                    ["codeunitId"] = reset.CodeunitId, ["methodName"] = method, ["status"] = unique ? "passed" : "failed",
+                    ["output"] = unique ? "" : $"Test case name '{method}' is not unique. ITestDataSource.ListTestCases() must return a distinct identifier for every test case.",
+                    ["durationMs"] = 5,
                 });
+            }
+        }
         return capture with { StdOut = capture.StdOut[..start] + root.ToJsonString() + capture.StdOut[(end + 1)..] };
     }
+
+    /// <summary>
+    /// Codeunit/method pairs that a test groups list selects more than once (an empty method list selects
+    /// every method of the codeunit); the server rejects such a run.
+    /// </summary>
+    public static IReadOnlyList<string> RepeatedTestCases(IEnumerable<AlToolTestRunner.TestGroup> groups) =>
+        groups.GroupBy(g => g.CodeunitId).SelectMany(c =>
+            c.Count() > 1 && c.Any(g => g.TestMethods.Count == 0)
+                ? new[] { $"{c.Key}/*" }
+                : c.SelectMany(g => g.TestMethods).GroupBy(m => m, StringComparer.OrdinalIgnoreCase).Where(m => m.Count() > 1).Select(m => $"{c.Key}/{m.Key}"))
+        .ToList();
 
     public static ProcessCapture Output(int exitCode, string stdout, string stderr = "") => new(exitCode, stdout, stderr, false);
 
@@ -239,7 +264,9 @@ public class AlToolExecutorTests
         Assert.Empty(run.RunnerErrors);
         Assert.Equal(new[] { new[] { reset, 50001, reset, 50003 }, new[] { reset, 50004 } },
             tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
-        Assert.All(tool.Calls.SelectMany(c => c.AllGroups).Where(g => g.CodeunitId == reset), g => Assert.Empty(g.TestMethods));
+        Assert.Equal(new[] { new[] { "ResetTestState01", "ResetTestState02" }, new[] { "ResetTestState01" } },
+            tool.Calls.Select(c => c.AllGroups.Where(g => g.CodeunitId == reset).Select(g => Assert.Single(g.TestMethods)).ToArray()));
+        Assert.All(tool.Calls, c => Assert.Empty(FakeAlTool.RepeatedTestCases(c.AllGroups)));
         Assert.Equal(new[] { "T" }, tool.Calls[0].AllGroups[3].TestMethods);
         Assert.Equal(new[] { 50001, 50002, 50003, 50004 }, run.Result.Codeunits.Select(c => c.CodeunitId!.Value));
         Assert.Equal(5, run.Result.Total);
@@ -253,10 +280,10 @@ public class AlToolExecutorTests
         const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
             (reset, "OnRun", "passed", null),
-            (reset, AlToolTestRunner.ResetMethodName, "passed", null),
+            (reset, "ResetTestState01", "passed", null),
             (50001, "A", "passed", null),
             (reset, "OnRun", "passed", null),
-            (reset, AlToolTestRunner.ResetMethodName, "failed", "Codeunit 130301 failed.\r\nAL Callstack:\r\n\"Reset State Before Test Run\"\r\n"),
+            (reset, "ResetTestState02", "failed", "Codeunit 130301 failed.\r\nAL Callstack:\r\n\"Reset State Before Test Run\"\r\n"),
             (50002, "B", "passed", null)), autoResets: false);
         var suite = Suite(Prepared(50001, "Alpha", true, Pending("A")), Prepared(50002, "Beta", true, Pending("B")));
 
@@ -264,7 +291,7 @@ public class AlToolExecutorTests
 
         var error = Assert.Single(run.RunnerErrors);
         Assert.Contains("the state reset before codeunit 50002 Beta failed", error);
-        Assert.Contains($"codeunit {reset} 'ResetTestState' failed", error);
+        Assert.Contains($"codeunit {reset} 'ResetTestState02' failed", error);
         Assert.Contains("Codeunit 130301 failed.", error);
         Assert.DoesNotContain("Reset State Before Test Run", error);
         Assert.Equal(2, run.Result.Total);
@@ -276,15 +303,98 @@ public class AlToolExecutorTests
     {
         const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
-            (reset, AlToolTestRunner.ResetMethodName, "passed", null),
+            (reset, "ResetTestState02", "passed", null),
             (50001, "A", "passed", null),
             (50002, "B", "passed", null)), autoResets: false);
         var suite = Suite(Prepared(50001, "Alpha", true, Pending("A")), Prepared(50002, "Beta", true, Pending("B")));
 
         var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
 
-        Assert.Contains($"reported 1 of 2 state reset(s) (codeunit {reset} ResetTestState)", Assert.Single(run.RunnerErrors));
+        var error = Assert.Single(run.RunnerErrors);
+        Assert.Contains($"reported 1 of 2 state reset(s) (codeunit {reset} ResetTestState01..ResetTestState02); codeunit(s) 50001 ran without", error);
         Assert.Equal(2, run.Result.Passed);
+    }
+
+    [Fact]
+    public void A_state_reset_method_of_an_old_test_runner_app_does_not_count()
+    {
+        const int reset = AlToolTestRunner.ResetMockStartedCodeunitId;
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
+            (reset, "ResetTestState", "passed", null),
+            (50001, "A", "passed", null)), autoResets: false);
+
+        var run = new AlToolTestRunner(tool.Execute).Run(Suite(Prepared(50001, "Alpha", true, Pending("A"))), Options());
+
+        Assert.Contains($"reported 0 of 1 state reset(s) (codeunit {reset} ResetTestState01)", Assert.Single(run.RunnerErrors));
+        Assert.Equal(1, run.Result.Passed);
+    }
+
+    [Theory]
+    [InlineData(20)]
+    [InlineData(AlToolTestRunner.MaxBatchSize)]
+    public void A_full_batch_selects_every_codeunit_method_pair_once(int codeunits)
+    {
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(Enumerable.Range(0, codeunits).Select(i => Prepared(60000 + i, $"C{i}", true, Pending("T"))).ToArray());
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: codeunits));
+
+        Assert.Empty(run.RunnerErrors);
+        var call = Assert.Single(tool.Calls);
+        Assert.Empty(FakeAlTool.RepeatedTestCases(call.AllGroups));
+        Assert.Equal(2 * codeunits, call.AllGroups.Count);
+        Assert.Equal(Enumerable.Range(1, codeunits).Select(AlToolTestRunner.ResetMethodName),
+            call.AllGroups.Where((_, i) => i % 2 == 0).Select(g => Assert.Single(g.TestMethods)));
+        Assert.Equal(codeunits, run.Result.Passed);
+        Assert.Equal(codeunits, run.Result.Total);
+    }
+
+    [Fact]
+    public void A_repeated_state_reset_method_is_reported_like_the_server_does()
+    {
+        // The defect this guards against: the same reset method before every codeunit of a batch.
+        var groups = new[]
+        {
+            new AlToolTestRunner.TestGroup(AlToolTestRunner.ResetMockStartedCodeunitId, new[] { "ResetTestState" }), new AlToolTestRunner.TestGroup(50001, Array.Empty<string>()),
+            new AlToolTestRunner.TestGroup(AlToolTestRunner.ResetMockStartedCodeunitId, new[] { "ResetTestState" }), new AlToolTestRunner.TestGroup(50002, Array.Empty<string>()),
+        };
+
+        Assert.Equal(new[] { $"{AlToolTestRunner.ResetMockStartedCodeunitId}/ResetTestState" }, FakeAlTool.RepeatedTestCases(groups));
+    }
+
+    [Fact]
+    public void State_reset_methods_are_numbered_per_position_and_limit_the_batch_size()
+    {
+        Assert.Equal("ResetTestState01", AlToolTestRunner.ResetMethodName(1));
+        Assert.Equal("ResetTestState50", AlToolTestRunner.ResetMethodName(AlToolTestRunner.ResetMethodCount));
+        Assert.Throws<ArgumentOutOfRangeException>(() => AlToolTestRunner.ResetMethodName(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => AlToolTestRunner.ResetMethodName(AlToolTestRunner.ResetMethodCount + 1));
+        Assert.Equal(7, AlToolTestRunner.ResetMethodPosition("resetteststate07"));
+        Assert.Equal(0, AlToolTestRunner.ResetMethodPosition("ResetTestState"));
+        Assert.Equal(0, AlToolTestRunner.ResetMethodPosition("ResetTestState00"));
+        Assert.Equal(0, AlToolTestRunner.ResetMethodPosition("ResetTestState51"));
+        Assert.Equal(0, AlToolTestRunner.ResetMethodPosition("OnRun"));
+        Assert.True(AlToolTestRunner.DefaultBatchSize <= AlToolTestRunner.MaxBatchSize);
+
+        var groups = Enumerable.Range(1, AlToolTestRunner.ResetMethodCount + 1).Select(i => new AlToolTestRunner.TestGroup(i, Array.Empty<string>()));
+        Assert.Throws<ArgumentException>(() => AlToolTestRunner.WithStateResets(groups, AlToolTestRunner.ResetMockStartedCodeunitId));
+    }
+
+    [Theory]
+    [InlineData("BcDevEnvResetMockStarted.Codeunit.al", AlToolTestRunner.ResetMockStartedCodeunitId)]
+    [InlineData("BcDevEnvResetMockStopped.Codeunit.al", AlToolTestRunner.ResetMockStoppedCodeunitId)]
+    public void The_state_reset_codeunits_have_one_test_method_per_batch_position(string file, int codeunitId)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", file))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var source = File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", file));
+
+        Assert.Matches($@"codeunit {codeunitId} ""[^""]+""", source);
+        Assert.Contains("Subtype = Test;", source);
+        var methods = Regex.Matches(source, @"\[Test\]\s+procedure (\w+)\(\)").Select(m => m.Groups[1].Value).ToList();
+        Assert.Equal(Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName), methods);
+        Assert.Equal(AlToolTestRunner.ResetMethodCount, Regex.Matches(source, @"procedure \w+\(\)").Count(m => m.Value.Contains(AlToolTestRunner.ResetMethodPrefix)));
     }
 
     [Fact]
@@ -302,7 +412,7 @@ public class AlToolExecutorTests
     {
         var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
         var suite = Suite(
-            Prepared(AlToolTestRunner.ResetMockStoppedCodeunitId, "BcDevEnv Reset Mock Stopped", true, Pending(AlToolTestRunner.ResetMethodName)),
+            Prepared(AlToolTestRunner.ResetMockStoppedCodeunitId, "BcDevEnv Reset Mock Stopped", true, Pending(AlToolTestRunner.ResetMethodName(1))),
             Prepared(50001, "Alpha", true, Pending("T")));
 
         var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
@@ -539,7 +649,7 @@ public class AlToolExecutorTests
         var plan = FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0));
         var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
-            (AlToolTestRunner.ResetMockStartedCodeunitId, AlToolTestRunner.ResetMethodName, "failed", "boom"),
+            (AlToolTestRunner.ResetMockStartedCodeunitId, AlToolTestRunner.ResetMethodName(1), "failed", "boom"),
             (50001, "A", "passed", null)), autoResets: false);
         var output = Path.Combine(dir.Path, "j.xml");
 
@@ -595,7 +705,10 @@ public class AlToolExecutorTests
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--protocol", "run-all"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--dev-port", "0"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--permissions-mock", "yes"));
+        Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "altool", "--altool", alTool, "--altool-batch-size", "51"));
         Assert.Throws<BcDevEnvException>(() => RunCommand(unused, tool, "--executor", "vstest"));
+        Assert.Equal(AlToolTestRunner.MaxBatchSize, RunTestsCommand.ParseBatchSize("50"));
+        Assert.Equal(AlToolTestRunner.DefaultBatchSize, RunTestsCommand.ParseBatchSize(null));
     }
 
     [Theory]

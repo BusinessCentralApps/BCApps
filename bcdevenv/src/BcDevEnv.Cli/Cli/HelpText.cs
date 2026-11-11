@@ -130,7 +130,7 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
   --dotnet <path>           dotnet host for altool.dll (default: %ProgramFiles%\dotnet\dotnet.exe)
   --dev-server <url>        Development endpoint host (default: http://localhost)
   --dev-port <n>            Development endpoint port (default: 7049)
-  --altool-batch-size <n>   Test codeunits per runtests call (default: 20)
+  --altool-batch-size <n>   Test codeunits per runtests call (default: 20, at most 50)
   --app-timeout-minutes <n> Total AL tool time budget for this run (default: 240); batches
                             that do not fit are reported as infrastructure errors
   --permissions-mock <on|off>  Before every test codeunit a BcDevEnv Test Runner codeunit

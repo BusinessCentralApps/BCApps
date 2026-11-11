@@ -194,7 +194,8 @@ With `per-codeunit`, `--executor` chooses who runs the selected tests:
   and only the enabled methods of the remaining codeunits are sent
   (`--testgroups [{"codeunitId":N,"testMethods":[...]}]`, an empty list when no
   method of the codeunit is disabled; codeunits disabled with `*` are not sent at
-  all). The codeunits go in batches (`--altool-batch-size`, default 20) within a
+  all). The codeunits go in batches (`--altool-batch-size`, default 20, at most 50 —
+  one state reset method per codeunit, see below) within a
   total time budget (`--app-timeout-minutes`, default 240). The server's
   development test runner picks the runner codeunit itself, honouring each
   codeunit's `RequiredTestIsolation`; `--test-runner-codeunit-id` only applies to
@@ -208,9 +209,14 @@ With `per-codeunit`, `--executor` chooses who runs the selected tests:
 **State reset (`altool`).** The server's development test runner raises none of the
 `Test Runner` hooks that reset the session around every test method, so the AL tool
 runs a reset test codeunit of the `BcDevEnv Test Runner` app before **every** test
-codeunit of every batch and isolation pass (`--testgroups [R, c1, R, c2, …]`):
+codeunit of every batch and isolation pass:
 codeunit 50103 `BcDevEnv Reset Mock Started` with `--permissions-mock on` (default),
-50104 `BcDevEnv Reset Mock Stopped` with `--permissions-mock off`. Both call codeunit
+50104 `BcDevEnv Reset Mock Stopped` with `--permissions-mock off`. The server rejects a
+run that selects the same codeunit/method pair twice ("Test case name '…' is not
+unique"), so each reset codeunit has 50 identical test methods `ResetTestState01` …
+`ResetTestState50` and the n-th reset of a batch selects method n
+(`--testgroups [{R,[ResetTestState01]}, c1, {R,[ResetTestState02]}, c2, …]`); this is
+why a batch holds at most 50 codeunits. Both codeunits call codeunit
 50102 `BcDevEnv Test State Reset`, which mirrors codeunit 130453 `ALTestRunner Reset
 Environment` (`BeforeTestMethod`/`AfterCodeunitRun`) and the permissions mock handling
 of `Test Runner - Mgt`:
@@ -228,10 +234,10 @@ of `Test Runner - Mgt`:
 The reset codeunits are never selected as tests (`PrepareTests` drops them), and
 their results are not counted, not written to the JUnit report and not matched against
 DisabledTests; the log shows `N result(s) (+M state reset(s))` per batch. A reset that
-does not pass, or a batch that reports fewer resets than it sent (for example an
-outdated runner app), is an infrastructure error that fails the command even with
-`--allow-failures`. See [Known differences](#bcapps-ci-pipeline) for what the reset
-does not cover.
+does not pass, or a batch that does not report the reset method of every position it
+sent (for example an outdated runner app), is an infrastructure error that fails the
+command even with `--allow-failures`. See [Known differences](#bcapps-ci-pipeline) for
+what the reset does not cover.
 
 ### DisabledTests
 

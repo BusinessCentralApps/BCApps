@@ -232,7 +232,7 @@ public static class RunTestsCommand
             Authentication = run.Authentication,
             UserName = run.UserName,
             Password = run.Password,
-            BatchSize = ParsePositiveInt(a.Get("altool-batch-size"), "altool-batch-size", AlToolTestRunner.DefaultBatchSize),
+            BatchSize = ParseBatchSize(a.Get("altool-batch-size")),
             Timeout = TimeSpan.FromMinutes(ParsePositiveInt(a.Get("app-timeout-minutes"), "app-timeout-minutes", AlToolTestRunner.DefaultTimeoutMinutes)),
             PermissionsMock = ParsePermissionsMock(a.Get("permissions-mock")),
         };
@@ -246,6 +246,16 @@ public static class RunTestsCommand
         if (trimmed.Equals("on", StringComparison.OrdinalIgnoreCase)) return true;
         if (trimmed.Equals("off", StringComparison.OrdinalIgnoreCase)) return false;
         throw new BcDevEnvException($"Invalid --permissions-mock '{value}'. Use on or off.");
+    }
+
+    /// <summary>--altool-batch-size: 1 to the number of state reset methods (one runs before every codeunit of a batch).</summary>
+    public static int ParseBatchSize(string? value)
+    {
+        var size = ParsePositiveInt(value, "altool-batch-size", AlToolTestRunner.DefaultBatchSize);
+        if (size > AlToolTestRunner.MaxBatchSize)
+            throw new BcDevEnvException($"Invalid --altool-batch-size '{value}'. Expected 1 to {AlToolTestRunner.MaxBatchSize} " +
+                                        "(the BcDevEnv Test Runner has one state reset method per codeunit of a batch).");
+        return size;
     }
 
     private static int ParsePositiveInt(string? value, string optionName, int defaultValue)
