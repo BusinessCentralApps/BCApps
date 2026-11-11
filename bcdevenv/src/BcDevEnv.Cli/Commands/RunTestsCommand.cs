@@ -189,15 +189,46 @@ public static class RunTestsCommand
             var alToolOptions = BuildAlToolOptions(a, options);
             Log.Info($"Executor: altool ({alToolOptions.AlToolPath}; development endpoint {alToolOptions.Server}:{alToolOptions.Port}/" +
                      $"{alToolOptions.ServerInstance}, {alToolOptions.Authentication} authentication). The BcDevEnvTestRunner selects the tests.");
-            var prepared = service.Prepare(options);
-            var alToolRun = alTool.Run(prepared, alToolOptions);
-            LogStateResetSummary(service, options, alToolRun.StateResetsPassed);
-            return new Collected(alToolRun.Result, alToolRun.RunnerErrors);
+            try
+            {
+                var prepared = service.Prepare(options);
+                var alToolRun = alTool.Run(prepared, alToolOptions);
+                LogStateResetSummary(service, options, alToolRun.StateResetsPassed);
+                return new Collected(alToolRun.Result, alToolRun.RunnerErrors);
+            }
+            finally
+            {
+                EndTestRun(service, options);
+            }
         }
 
         Log.Info($"Executor: odata ({options.ServiceName} RunCodeunit, one call per codeunit).");
-        var perCodeunitRun = service.RunPerCodeunit(options);
-        return new Collected(perCodeunitRun.Result, perCodeunitRun.RunnerErrors);
+        try
+        {
+            var perCodeunitRun = service.RunPerCodeunit(options);
+            return new Collected(perCodeunitRun.Result, perCodeunitRun.RunnerErrors);
+        }
+        finally
+        {
+            EndTestRun(service, options);
+        }
+    }
+
+    // PrepareTests starts a test run during which every client session that opens a company gets ApplicationArea('')
+    // (the login hook of the BcDevEnv Test Runner app); ending it keeps that from reaching sessions after the run, such
+    // as interactive web client sessions. Best effort, it runs in a finally block: a failure (or an older app without
+    // EndTestRun) is a warning and never replaces the run's outcome.
+    private static void EndTestRun(NavTestService service, NavTestService.RunOptions options)
+    {
+        try
+        {
+            Log.Verbose($"Test run: {service.EndTestRun(options)}.");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Could not end the test run ({NavTestService.EndTestRunAction}); until a later run ends, every client session that " +
+                     $"opens a company gets an empty application area. {ex.Message}");
+        }
     }
 
     // What the passed state resets committed (the "Application Area Setup" restores); informational, a missing
@@ -219,6 +250,7 @@ public static class RunTestsCommand
         var (info, warning) = AlToolTestRunner.StateResetSummaryMessages(summary, resetsPassed);
         Log.Info(info);
         if (warning != null) Log.Warn(warning);
+        if (AlToolTestRunner.LoginApplicationAreaWarning(summary, resetsPassed) is { } loginWarning) Log.Warn(loginWarning);
     }
 
     public const string ODataExecutor = "odata";

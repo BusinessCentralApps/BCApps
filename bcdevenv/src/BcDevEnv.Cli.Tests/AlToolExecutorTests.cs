@@ -600,9 +600,33 @@ public class AlToolExecutorTests
             """{"@odata.context":"x","value":"{\"tablePresent\":true,\"baselineRows\":0,\"resets\":41,\"restores\":2,\"removed\":2,\"recreated\":0,\"modified\":0}"}"""));
 
         Assert.Equal(new NavTestService.StateResetSummary { TablePresent = true, BaselineRows = 0, Resets = 41, Restores = 2, Removed = 2 }, summary);
+        Assert.Null(summary.LoginSessions);
         Assert.Equal(-1, NavTestService.ParseStateResetSummary("{}").BaselineRows);
+        var withLogin = NavTestService.ParseStateResetSummary("""{"tablePresent":true,"baselineRows":1,"resets":41,"loginSessions":83,"loginSessionsWithArea":83}""");
+        Assert.Equal((83, 83), (withLogin.LoginSessions, withLogin.LoginSessionsWithArea));
         Assert.Throws<BcDevEnvException>(() => NavTestService.ParseStateResetSummary("not json"));
         Assert.Throws<BcDevEnvException>(() => NavTestService.ParseStateResetSummary("null"));
+    }
+
+    [Fact]
+    public void The_state_reset_summary_reports_the_login_application_area_hook()
+    {
+        var summary = new NavTestService.StateResetSummary { TablePresent = true, BaselineRows = 1, Resets = 41, LoginSessions = 83, LoginSessionsWithArea = 83 };
+
+        var (info, warning) = AlToolTestRunner.StateResetSummaryMessages(summary, 41);
+        Assert.Equal("State reset: 41 state reset(s) committed (41 passed); \"Application Area Setup\" (baseline 1 row(s)) restored by 0 of them: " +
+                     "0 row(s) removed, 0 re-created, 0 modified; login ApplicationArea cleared in 83 session(s) (83 had one set at login).", info);
+        Assert.Null(warning);
+        Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary, 41));
+        Assert.EndsWith("; there is no \"Application Area Setup\" table to restore; login ApplicationArea cleared in 2 session(s) (0 had one set at login).",
+            AlToolTestRunner.StateResetSummaryMessages(new NavTestService.StateResetSummary { Resets = 1, LoginSessions = 2 }, 1).Info);
+
+        // Every passed reset ran in a client session of its own, so the hook should have counted each of them.
+        Assert.Contains("cleared in only 0 session(s), fewer than the 41 passed state reset(s)",
+            AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = 0, LoginSessionsWithArea = 0 }, 41));
+        // A runner app without the login hook reports no sessions: neither a count nor a warning.
+        Assert.Null(AlToolTestRunner.LoginApplicationAreaWarning(summary with { LoginSessions = null }, 41));
+        Assert.DoesNotContain("login", AlToolTestRunner.StateResetSummaryMessages(summary with { LoginSessions = null }, 41).Info);
     }
 
     [Fact]
@@ -727,6 +751,34 @@ public class AlToolExecutorTests
         Assert.Contains("Subtype = Test;", source);
         Assert.Equal(new[] { AlToolTestRunner.StateProbeMethodName },
             Regex.Matches(source, @"\[Test\]\s+procedure (\w+)\(\)").Select(m => m.Groups[1].Value));
+    }
+
+    [Fact]
+    public void The_login_hook_clears_only_the_session_application_area_while_a_run_is_active()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvLoginAppArea.Codeunit.al"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var source = File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", "BcDevEnvLoginAppArea.Codeunit.al"));
+        var runner = File.ReadAllText(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvTestRunner.Codeunit.al"));
+
+        Assert.Matches(@"codeunit 50109 ""BcDevEnv Login App Area""", source);
+        // After the Base Application's login (OnCompanyOpen) has set the application area, in the test session itself.
+        var subscriber = Regex.Match(source,
+            @"\[EventSubscriber\(ObjectType::Codeunit, Codeunit::""Company Triggers"", OnCompanyOpenCompleted, '', false, false\)\]\s+" +
+            @"local procedure \w+\(\)\s+begin(?<body>.*?)\r?\n    end;", RegexOptions.Singleline);
+        Assert.True(subscriber.Success);
+        var body = subscriber.Groups["body"].Value;
+        var clear = body.IndexOf("ApplicationArea('');", StringComparison.Ordinal);
+        Assert.InRange(body.IndexOf("if not GuiAllowed() then", StringComparison.Ordinal), 0, clear);
+        Assert.InRange(body.IndexOf("if not IsRunActive() then", StringComparison.Ordinal), 0, clear);
+        // Session only: "Application Area Setup" keeps its rows (tests that read it keep the standard semantics).
+        var code = Regex.Replace(source, @"//[^\r\n]*", "");
+        Assert.DoesNotMatch(@"Record ""Application Area Setup""|9178|RecordRef", code);
+
+        // PrepareTests starts the run, EndTestRun (which the CLI calls) ends it.
+        Assert.Contains("LoginAppArea.StartRun();", runner);
+        Assert.Matches($@"procedure {NavTestService.EndTestRunAction}\(\): Text\s+var\s+LoginAppArea: Codeunit ""BcDevEnv Login App Area"";\s+begin\s+if LoginAppArea.EndRun\(\)", runner);
     }
 
     [Fact]
@@ -916,7 +968,7 @@ public class AlToolExecutorTests
             "--test-type", "UnitTest", "--required-test-isolation", "Disabled", "--result-file", output);
 
         Assert.Equal(0, exit);
-        Assert.Equal(new[] { "PrepareTests", "GetCodeunitResults", "GetStateResetSummary" }, runner.Requests.Select(r => r.Action));
+        Assert.Equal(new[] { "PrepareTests", "GetCodeunitResults", "GetStateResetSummary", "EndTestRun" }, runner.Requests.Select(r => r.Action));
         var call = Assert.Single(tool.Calls);
         Assert.Equal("my-dotnet", call.FileName);
         Assert.Equal("17049", call.Arguments[call.Arguments.ToList().IndexOf("--port") + 1]);
@@ -1012,6 +1064,7 @@ public class AlToolExecutorTests
             "--allow-failures", "--result-file", output));
         Assert.Single(XDocument.Load(output).Descendants("testcase"));
         Assert.DoesNotContain(runner.Requests, r => r.Action == NavTestService.GetStateResetSummaryAction);
+        Assert.Equal(NavTestService.EndTestRunAction, runner.Requests.Last().Action);
     }
 
     [Fact]
@@ -1022,16 +1075,39 @@ public class AlToolExecutorTests
         var plan = FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0));
         var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results((50001, "A", "passed", null)));
-        var current = WithPrepare(plan, template, """{"tablePresent":true,"baselineRows":0,"resets":1,"restores":1,"removed":1,"recreated":0,"modified":0}""");
+        var current = WithPrepare(plan, template,
+            """{"tablePresent":true,"baselineRows":0,"resets":1,"restores":1,"removed":1,"recreated":0,"modified":0,"loginSessions":2,"loginSessionsWithArea":2}""");
         var old = WithPrepare(plan, template);
 
         Assert.Equal(0, RunCommand(current, tool, "--executor", "altool", "--altool", alTool, "--result-file", Path.Combine(dir.Path, "a.xml")));
+        // An older app has neither GetStateResetSummary nor EndTestRun: both are only warnings.
         Assert.Equal(0, RunCommand(old, tool, "--executor", "altool", "--altool", alTool, "--result-file", Path.Combine(dir.Path, "b.xml")));
 
-        Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.GetCodeunitResultsAction, NavTestService.GetStateResetSummaryAction },
+        Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.GetCodeunitResultsAction, NavTestService.GetStateResetSummaryAction,
+                             NavTestService.EndTestRunAction },
             current.Requests.Select(r => r.Action));
-        Assert.Equal(NavTestService.GetStateResetSummaryAction, old.Requests.Last().Action);
+        Assert.Equal(new[] { NavTestService.GetStateResetSummaryAction, NavTestService.EndTestRunAction }, old.Requests.TakeLast(2).Select(r => r.Action));
         Assert.Single(XDocument.Load(Path.Combine(dir.Path, "b.xml")).Descendants("testcase"));
+    }
+
+    [Fact]
+    public void Command_ends_the_test_run_also_when_the_run_fails()
+    {
+        using var dir = new TempDir();
+        var alTool = dir.Write("altool.dll", "");
+        var plan = FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0));
+        var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
+        var prepareFails = new FakeRunnerHandler((action, _) => action == NavTestService.PrepareAction
+            ? FakeRunnerHandler.Error(HttpStatusCode.InternalServerError, "prepare failed")
+            : FakeRunnerHandler.Value("ended"));
+        var toolCrashes = WithPrepare(plan, template, "{}");
+        var crash = new FakeAlTool((_, _) => throw new InvalidOperationException("the AL tool executor broke"));
+
+        Assert.Throws<BcDevEnvException>(() => RunCommand(prepareFails, crash, "--executor", "altool", "--altool", alTool));
+        Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.EndTestRunAction }, prepareFails.Requests.Select(r => r.Action));
+        Assert.Equal("the AL tool executor broke",
+            Assert.Throws<InvalidOperationException>(() => RunCommand(toolCrashes, crash, "--executor", "altool", "--altool", alTool)).Message);
+        Assert.Equal(NavTestService.EndTestRunAction, toolCrashes.Requests.Last().Action);
     }
 
     [Fact]
@@ -1122,8 +1198,8 @@ public class AlToolExecutorTests
             new NavTestService(handler), new AlToolTestRunner(tool.Execute));
     }
 
-    // PrepareTests returns the plan, GetCodeunitResults the template and GetStateResetSummary the summary (without one
-    // a 404, as from an older BcDevEnv Test Runner app); RunCodeunit must not be called.
+    // PrepareTests returns the plan, GetCodeunitResults the template, GetStateResetSummary the summary and EndTestRun
+    // 'ended' (without a summary both a 404, as from an older BcDevEnv Test Runner app); RunCodeunit must not be called.
     private static FakeRunnerHandler WithPrepare(string planJson, string templateXml, string? summaryJson = null) =>
         new((action, _) => action switch
         {
@@ -1131,6 +1207,9 @@ public class AlToolExecutorTests
             "GetCodeunitResults" => FakeRunnerHandler.Value(templateXml),
             NavTestService.GetStateResetSummaryAction => summaryJson != null
                 ? FakeRunnerHandler.Value(summaryJson)
+                : FakeRunnerHandler.Error(HttpStatusCode.NotFound, "No HTTP resource was found that matches the request URI."),
+            NavTestService.EndTestRunAction => summaryJson != null
+                ? FakeRunnerHandler.Value("ended")
                 : FakeRunnerHandler.Error(HttpStatusCode.NotFound, "No HTTP resource was found that matches the request URI."),
             _ => throw new InvalidOperationException($"Unexpected {action}"),
         });

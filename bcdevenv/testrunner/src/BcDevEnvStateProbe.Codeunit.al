@@ -1,7 +1,8 @@
 // Diagnostic only: 'bcdevenv run-tests --executor altool --state-probe on' runs ProbeState once per AL tool
 // batch, right after the first state reset and before the first test codeunit. It always fails on purpose:
-// its error message is one line with the state a test codeunit starts with (application area, session, work
-// date, permissions mock, the "Application Area Setup" rows and the restores of the state reset since
+// its error message is one line with the state a test codeunit starts with (application area, what the login
+// hook of codeunit 50109 did in this session, session, work date, permissions mock, the "Application Area
+// Setup" rows and the restores of the state reset since
 // PrepareTests) and whether a TestPage finds controls in the Basic and Suite application areas, with the
 // application area it found and after ApplicationArea(''). The CLI logs it as "State probe: ..." and never
 // reports it as a test result. The AL tool runs every test codeunit in a new session, so the probe's own
@@ -26,9 +27,11 @@ codeunit 50105 "BcDevEnv State Probe"
     procedure ProbeState()
     var
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
+        LoginAppArea: Codeunit "BcDevEnv Login App Area";
         Diagnostic: TextBuilder;
     begin
         Diagnostic.Append(StrSubstNo('ApplicationArea=''%1''; SessionId=%2; ClientType=%3; GuiAllowed=%4', ApplicationArea(), SessionId(), CurrentClientType(), GuiAllowed()));
+        Diagnostic.Append(StrSubstNo('; login hook: %1', LoginAppArea.GetSessionText()));
         Diagnostic.Append(StrSubstNo('; Company=''%1''; User=''%2''; WorkDate=%3', CompanyName(), UserId(), Format(WorkDate(), 0, 9)));
         Diagnostic.Append(StrSubstNo('; PermissionsMock=%1', PermissionsMockState()));
         Diagnostic.Append(StrSubstNo('; Application Area Setup: %1', ApplicationAreaSetupRows()));

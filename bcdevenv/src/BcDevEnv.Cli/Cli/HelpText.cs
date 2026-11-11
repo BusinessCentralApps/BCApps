@@ -134,7 +134,10 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
   --app-timeout-minutes <n> Total AL tool time budget for this run (default: 240); batches
                             that do not fit are reported as infrastructure errors
   --permissions-mock <on|off>  The AL tool runs every test codeunit in a new session, so the
-                            session state (ApplicationArea, work date, last error) starts fresh.
+                            session state (ApplicationArea, work date, last error) starts fresh;
+                            while the run is active (PrepareTests until the CLI ends it), the
+                            BcDevEnv Test Runner clears the ApplicationArea that each such
+                            session gets at login, as the Test Runner does before every method.
                             Before every test codeunit a BcDevEnv Test Runner codeunit resets
                             the state that outlives a session: it restores the Application
                             Area Setup table to its state before the first test and commits
@@ -143,13 +146,15 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
                             codeunits whose TestPermissions is Disabled, otherwise with the
                             D365 Full Access base of codeunit 130302 (when present), as the
                             Test Runner does per method; off: it is stopped. A failed reset
-                            is an infrastructure error. The restores are logged as
-                            "State reset: ..." after the run.
+                            is an infrastructure error. The restores and the sessions whose
+                            login ApplicationArea was cleared are logged as "State reset: ..."
+                            after the run.
   --state-probe <on|off>    Diagnostic, off by default. on: the BcDevEnv State Probe codeunit
                             runs once per batch, after the first reset; it always fails and
-                            its message (ApplicationArea, session, Application Area Setup and
-                            its restores, TestPage control visibility, permissions mock, work
-                            date) is logged as "State probe: ...". It is not a test result.
+                            its message (ApplicationArea and the login hook, session,
+                            Application Area Setup and its restores, TestPage control
+                            visibility, permissions mock, work date) is logged as
+                            "State probe: ...". It is not a test result.
 
   Runner call failures and disabled-test violations fail the command even with --allow-failures.
 """,

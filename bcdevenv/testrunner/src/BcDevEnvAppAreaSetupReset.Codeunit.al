@@ -2,8 +2,9 @@
 // 'bcdevenv run-tests --executor altool' runs every test codeunit in a new session, whose application area is
 // computed at login from this table: a row that a test commits (a codeunit with RequiredTestIsolation = Disabled,
 // e.g. "APIV1 - Employees E2E" enabling the Basic HR experience) would otherwise hide the Basic and Suite controls
-// from every later test codeunit. The state reset (codeunit 50102) restores it before every test codeunit and
-// commits.
+// from every later test codeunit, and code that reads the table would see it. The login hook (codeunit 50109) clears
+// the session's application area since, but not the table. The state reset (codeunit 50102) restores it before every
+// test codeunit and commits.
 //
 // The baseline is captured once per database (PrepareTests, or the first state reset when PrepareTests did not
 // run) and stored in isolated storage (module scope, so every session, company and user sees it). It has all
@@ -75,14 +76,12 @@ codeunit 50108 "BcDevEnv App Area Setup Reset"
     end;
 
     /// <summary>
-    /// The resets since the last PrepareTests as JSON: tablePresent, baselineRows (-1 without a baseline), resets,
-    /// restores (resets that changed the table), removed, recreated and modified (rows).
+    /// Adds the resets since the last PrepareTests to the state reset summary: tablePresent, baselineRows (-1 without a
+    /// baseline), resets, restores (resets that changed the table), removed, recreated and modified (rows).
     /// </summary>
-    procedure GetSummaryJson(): Text
+    procedure AddSummary(var Summary: JsonObject)
     var
         Counters: JsonObject;
-        Summary: JsonObject;
-        Result: Text;
     begin
         ReadCounters(Counters);
         Summary.Add('tablePresent', IsTablePresent());
@@ -92,8 +91,6 @@ codeunit 50108 "BcDevEnv App Area Setup Reset"
         Summary.Add(RemovedTok, GetCounter(Counters, RemovedTok));
         Summary.Add(RecreatedTok, GetCounter(Counters, RecreatedTok));
         Summary.Add(ModifiedTok, GetCounter(Counters, ModifiedTok));
-        Summary.WriteTo(Result);
-        exit(Result);
     end;
 
     /// <summary>One line for the state probe.</summary>

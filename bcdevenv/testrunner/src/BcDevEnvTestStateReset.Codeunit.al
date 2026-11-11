@@ -6,8 +6,9 @@
 // the tests through the server's development test runner, which raises none of those events and runs every
 // test codeunit (and every reset) in a new session. Session state such as the application area, the work
 // date and the last error therefore starts fresh in every test codeunit: the application area is computed
-// at login from table 9178 "Application Area Setup", the work date is the login default. The reset does not
-// set it; it reaches the next codeunit only through
+// at login from table 9178 "Application Area Setup" and then cleared by the login hook of codeunit 50109
+// (ApplicationArea(''), as 130453 does before every method), the work date is the login default. The reset
+// does not set it; it reaches the next codeunit only through
 //   * the database: "Application Area Setup" is restored to the baseline captured before the first test
 //     (codeunit 50108) and committed (the reset codeunits have RequiredTestIsolation = Disabled), so a row
 //     that an earlier test committed no longer changes the application area of every later codeunit;

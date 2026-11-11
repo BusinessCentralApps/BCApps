@@ -109,12 +109,15 @@ public sealed class NavTestService
     public const string RunCodeunitAction = "RunCodeunit";
     public const string GetCodeunitResultsAction = "GetCodeunitResults";
     public const string GetStateResetSummaryAction = "GetStateResetSummary";
+    public const string EndTestRunAction = "EndTestRun";
 
     /// <summary>
     /// What the AL tool executor's state resets did since the last PrepareTests (GetStateResetSummary):
     /// <see cref="Resets"/> committed resets, <see cref="Restores"/> of them changed "Application Area Setup"
     /// (rows <see cref="Removed"/>, <see cref="Recreated"/>, <see cref="Modified"/>) back to its baseline of
     /// <see cref="BaselineRows"/> rows (-1: no baseline; <see cref="TablePresent"/> false: no such table).
+    /// <see cref="LoginSessions"/> client sessions got ApplicationArea('') at login, <see cref="LoginSessionsWithArea"/>
+    /// of them had an application area set at login (both null for a runner app without the login hook).
     /// </summary>
     public sealed record StateResetSummary
     {
@@ -125,6 +128,8 @@ public sealed class NavTestService
         public int Removed { get; init; }
         public int Recreated { get; init; }
         public int Modified { get; init; }
+        public int? LoginSessions { get; init; }
+        public int? LoginSessionsWithArea { get; init; }
     }
 
     private readonly HttpMessageHandler? _handler;
@@ -276,6 +281,17 @@ public sealed class NavTestService
     {
         using var client = CreateClient(options);
         return ParseStateResetSummary(Post(client, BuildActionUrl(options, GetStateResetSummaryAction), "{}", options));
+    }
+
+    /// <summary>
+    /// Ends the test run that PrepareTests started (EndTestRun of the BcDevEnv Test Runner): client sessions that
+    /// open a company keep the application area they get at login again. Returns the runner's status ('ended' or
+    /// 'not active'). Throws <see cref="BcDevEnvException"/> when the action fails or is missing (an older app).
+    /// </summary>
+    public string EndTestRun(RunOptions options)
+    {
+        using var client = CreateClient(options);
+        return Post(client, BuildActionUrl(options, EndTestRunAction), "{}", options);
     }
 
     /// <summary>Parses the JSON returned by GetStateResetSummary.</summary>

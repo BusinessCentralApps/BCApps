@@ -212,7 +212,8 @@ every test codeunit in a **new session** (the state probe reports a new session 
 every codeunit). Session state — the application area, work date, last error,
 notification context, single-instance codeunits — therefore starts fresh in every test
 codeunit by construction: the application area is computed at login from table 9178
-`Application Area Setup`, the work date is the login default, and `Library - Random`
+`Application Area Setup` (and then cleared, see **Login application area** below),
+the work date is the login default, and `Library - Random`
 seeds itself with 1 on its first use in the session. What one test codeunit leaves for
 the next is the state that outlives a session: committed data and the permissions mock.
 So the AL tool runs a reset test codeunit of the `BcDevEnv Test Runner` app before
@@ -285,12 +286,42 @@ sent (for example an outdated runner app), is an infrastructure error that fails
 command even with `--allow-failures`. After the last batch the CLI reads the runner's
 `GetStateResetSummary` and logs what the resets committed, for example
 `State reset: 41 state reset(s) committed (41 passed); "Application Area Setup"
-(baseline 0 row(s)) restored by 2 of them: 2 row(s) removed, 0 re-created, 0 modified.`
+(baseline 0 row(s)) restored by 2 of them: 2 row(s) removed, 0 re-created, 0 modified;
+login ApplicationArea cleared in 82 session(s) (2 had one set at login).`
 Each reset counts itself in the transaction of its restore, so fewer committed than
 passed resets means the server rolled resets back (a runner app whose reset codeunits
 are not `RequiredTestIsolation = Disabled`); that, and a runner app without the action,
 is a warning. See [Known differences](#bcapps-ci-pipeline) for what the reset does not
 cover.
+
+**Login application area (`altool`).** The Test Runner calls `ApplicationArea('')`
+before every test method (codeunit 130453), so its tests see every control whatever
+`Application Area Setup` holds. Here every test codeunit logs in anew, and the Base
+Application's login (`LogInManagement`, on `Company Triggers` `OnCompanyOpen`) sets the
+session's application area from that table: a company row in the baseline — the NL
+`My Company` has the Essential experience, without `#Manufacturing` — hides every
+control outside it ("not found on the page") from every test codeunit, which the
+restore above does not change. So codeunit 50109 `BcDevEnv Login App Area` subscribes
+to the platform's `Company Triggers` `OnCompanyOpenCompleted`, which is raised after all
+`OnCompanyOpen` subscribers, and calls `ApplicationArea('')` in every client session
+(`GuiAllowed`) that opens a company **while a test run is active**: from `PrepareTests`
+until the CLI calls the runner's `EndTestRun` when `run-tests` finishes (also after a
+failure). Each test codeunit, reset and probe of the AL tool runs in such a session, so
+each test codeunit starts with the empty application area, in its own session, before
+its code runs. Only the session changes, never the table: tests that read
+`Application Area Setup` (for example the fallback to it when the session's
+application area is empty) keep the standard semantics. The runner's OData sessions
+are not client sessions and are not affected. The summary line above reports the
+sessions (about the number of test codeunits, resets and probes) and how many had an
+application area at login; fewer sessions than passed resets is a warning, and so is a
+runner app without `EndTestRun`. Limits: the order among `OnCompanyOpenCompleted`
+subscribers is not defined (one that sets the application area after this one wins);
+**every** client session that opens a company while a run is active is affected,
+interactive web client sessions of any user included; and a run that ends without
+`EndTestRun` (a killed CLI, a lost connection) leaves the hook active until a later
+`run-tests` ends — in CI the container is discarded anyway. It clears the application
+area once per codeunit, not before every method (see
+[Known differences](#bcapps-ci-pipeline)).
 
 **State probe (`altool`, diagnostic, off by default).** With `--state-probe on`, the
 AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, right after
@@ -298,7 +329,9 @@ the first state reset (`[{R1,[ResetTestState01]}, {50105,[ProbeState]}, c1,
 {R2,[ResetTestState02]}, c2, …]`). It runs in its own new session, like a test
 codeunit, so it sees the state the batch's first test codeunit starts with. Its only
 test method always fails with one diagnostic line, which the CLI logs as
-`State probe: <batch>: …`: `ApplicationArea()`, the session id, client type and
+`State probe: <batch>: …`: `ApplicationArea()`, what the login hook did in the
+session (`login hook: cleared '<area at login>' at login; N client session(s) since
+PrepareTests, M with an application area at login`), the session id, client type and
 `GuiAllowed`, the company, user and work date, the permissions mock state (when
 compiled with it), the rows of table 9178 `Application Area Setup` (read through
 `RecordRef`, so the runner does not depend on the Base Application) and the restores
@@ -311,7 +344,9 @@ app) is only a warning. Switch it with the action input `testStateProbe` or the 
 setting `bcdevenvTestStateProbe` (`true`/`on`, or `false`/`off`, the default). The
 repository's `.github/AL-Go-Settings.json` sets it to `true` **temporarily**, to show
 that every probe after a codeunit that committed an `Application Area Setup` row
-reports no rows and `ApplicationArea=''` again; turn it off once that is confirmed.
+reports no rows and `ApplicationArea=''` again, and that the probe reports
+`ApplicationArea=''` with the area the login hook cleared also in companies whose
+baseline has a row (NL `My Company`); turn it off once that is confirmed.
 
 ### DisabledTests
 
@@ -473,7 +508,9 @@ carries over from one method to the next:
 
 - the session state a method changes: application area, work date, last error and
   notification context, and the random sequence (the Test Runner reseeds with 1 before
-  every method; here only the codeunit's first use of `Library - Random` seeds 1);
+  every method; here only the codeunit's first use of `Library - Random` seeds 1; the
+  login hook clears the application area once, when the codeunit's session opens the
+  company, where the Test Runner clears it before every method);
 - permission set assignments a method makes (`PermissionsMock.Set`,
   `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method
   (and, unless the method's `TestPermissions` is `Disabled`, assigns the D365 Full
@@ -487,7 +524,8 @@ carries over from one method to the next:
 Between test codeunits the reset restores only `Application Area Setup`; other data
 that codeunits with `RequiredTestIsolation = Disabled` commit stays for the later
 codeunits, as with the Test Runner, but each later codeunit computes its session state
-from it at login, which the Test Runner's single session does not.
+from it at login (except the application area, which the login hook clears), which the
+Test Runner's single session does not.
 
 The D365 Full Access base (codeunit 130302) is chosen per codeunit from its first
 selected method's `TestPermissions` (see [Running tests](#running-tests)); it needs

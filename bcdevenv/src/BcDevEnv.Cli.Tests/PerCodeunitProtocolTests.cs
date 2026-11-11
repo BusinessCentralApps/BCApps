@@ -269,6 +269,27 @@ public class PerCodeunitProtocolTests
     }
 
     [Fact]
+    public void Command_ends_the_test_run_after_the_codeunits_and_a_failure_to_end_it_is_only_a_warning()
+    {
+        using var dir = new TempDir();
+        var ends = WithPrepare(new FakeRunnerHandler((action, _) => action == NavTestService.EndTestRunAction
+                ? FakeRunnerHandler.Value("ended")
+                : FakeRunnerHandler.Value(FakeRunnerHandler.XUnit(50001, "Alpha Tests", ("A", "Success", null)))),
+            FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0)));
+        var cannotEnd = WithPrepare(new FakeRunnerHandler((action, _) => action == NavTestService.EndTestRunAction
+                ? FakeRunnerHandler.Error(HttpStatusCode.NotFound, "no such action")
+                : FakeRunnerHandler.Value(FakeRunnerHandler.XUnit(50001, "Alpha Tests", ("A", "Success", null)))),
+            FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0)));
+
+        Assert.Equal(0, RunCommand(ends, "--protocol", "per-codeunit", "--result-file", Path.Combine(dir.Path, "a.xml")));
+        Assert.Equal(0, RunCommand(cannotEnd, "--protocol", "per-codeunit", "--result-file", Path.Combine(dir.Path, "b.xml")));
+
+        Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.RunCodeunitAction, NavTestService.EndTestRunAction },
+            ends.Requests.Select(r => r.Action));
+        Assert.Equal(NavTestService.EndTestRunAction, cannotEnd.Requests.Last().Action);
+    }
+
+    [Fact]
     public void Disabled_tests_require_the_per_codeunit_protocol()
     {
         using var dir = new TempDir();

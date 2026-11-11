@@ -25,7 +25,10 @@ namespace BcDevEnv.Cli.Testing;
 ///
 /// <para>The server's development test runner raises none of the Test Runner's per-test events and runs every
 /// test codeunit in a new session, so session state (application area, work date, last error) starts fresh in
-/// every codeunit. A state reset codeunit of the BcDevEnv Test Runner app runs before every test codeunit of
+/// every codeunit. While the run is active (PrepareTests until EndTestRun), the BcDevEnv Test Runner app clears
+/// the application area that such a session gets at login (ApplicationArea(''), as the Test Runner does before
+/// every test method); the CLI ends the run after the AL tool. A state reset codeunit of the BcDevEnv Test Runner
+/// app runs before every test codeunit of
 /// every batch for the state that outlives a session: it restores "Application Area Setup" to the baseline of
 /// PrepareTests and commits it (the reset codeunits have RequiredTestIsolation = Disabled), and it sets up the
 /// permissions mock: <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
@@ -283,7 +286,8 @@ public sealed class AlToolTestRunner
     /// <summary>
     /// The log line for what the state resets of a run did (GetStateResetSummary of the BcDevEnv Test Runner) after
     /// <paramref name="resetsPassed"/> passed state resets, and a warning when fewer resets were committed than passed:
-    /// the others were rolled back, including their "Application Area Setup" restore.
+    /// the others were rolled back, including their "Application Area Setup" restore. With a runner app that has the
+    /// login hook, the line also says in how many client sessions it cleared the login application area.
     /// </summary>
     public static (string Info, string? Warning) StateResetSummaryMessages(NavTestService.StateResetSummary summary, int resetsPassed)
     {
@@ -294,12 +298,30 @@ public sealed class AlToolTestRunner
                 ? $"{committed}; \"Application Area Setup\" has no baseline, nothing was restored."
                 : $"{committed}; \"Application Area Setup\" (baseline {summary.BaselineRows} row(s)) restored by {summary.Restores} of them: " +
                   $"{summary.Removed} row(s) removed, {summary.Recreated} re-created, {summary.Modified} modified.";
+        if (summary.LoginSessions is { } sessions)
+            info = $"{info.TrimEnd('.')}; login ApplicationArea cleared in {sessions} session(s) " +
+                   $"({summary.LoginSessionsWithArea ?? 0} had one set at login).";
         string? warning = null;
         if (summary.Resets < resetsPassed)
             warning = $"State reset: only {summary.Resets} of {resetsPassed} passed state reset(s) were committed; the others were rolled back, " +
                       "including their \"Application Area Setup\" restore. Is the current BcDevEnv Test Runner app (reset codeunits with " +
                       "RequiredTestIsolation = Disabled) installed?";
         return (info, warning);
+    }
+
+    /// <summary>
+    /// A warning when the login hook of the BcDevEnv Test Runner (ApplicationArea('') in every client session that opens
+    /// a company during the run) cleared the application area in fewer sessions than <paramref name="resetsPassed"/>:
+    /// the AL tool runs every state reset in a session of its own, so each passed reset should have been counted.
+    /// Null when it was not fewer, or when the runner app has no login hook (<see cref="NavTestService.StateResetSummary.LoginSessions"/> null).
+    /// </summary>
+    public static string? LoginApplicationAreaWarning(NavTestService.StateResetSummary summary, int resetsPassed)
+    {
+        if (summary.LoginSessions is not { } sessions || sessions >= resetsPassed)
+            return null;
+        return $"State reset: the login ApplicationArea was cleared in only {sessions} session(s), fewer than the {resetsPassed} passed " +
+               "state reset(s), which each ran in a session of their own; test codeunits may have run with the application area of " +
+               "\"Application Area Setup\" (controls outside it are \"not found on the page\").";
     }
 
     /// <summary>The state reset codeunit for the permissions mock setting (TestPermissions unknown).</summary>

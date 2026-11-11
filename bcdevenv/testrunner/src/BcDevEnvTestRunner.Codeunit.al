@@ -12,7 +12,8 @@
 //                                      codeunit per call so a hung/failed call only loses that
 //                                      codeunit and progress can be reported.
 // PrepareTests also starts a test run for the AL tool executor's state resets (codeunit 50102), which
-// GetStateResetSummary reports on afterwards.
+// GetStateResetSummary reports on afterwards, and during which every client session that opens a company gets
+// ApplicationArea('') (codeunit 50109) until EndTestRun.
 //
 // All action parameters are Text (the type proven to round-trip over OData); numeric values are
 // parsed inside the procedures.
@@ -82,6 +83,7 @@ codeunit 50100 "BcDevEnv Test Runner"
         TestSuiteMgt: Codeunit "Test Suite Mgt.";
         TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture";
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
+        LoginAppArea: Codeunit "BcDevEnv Login App Area";
         DisabledMethods: Dictionary of [Text, List of [Text]];
         SuiteName: Code[10];
         TestTypeValue: Integer;
@@ -114,6 +116,8 @@ codeunit 50100 "BcDevEnv Test Runner"
         ApplyDisabledTests(SuiteName, DisabledMethods);
         // The baseline that the state reset restores "Application Area Setup" to (captured once, before any test).
         AppAreaSetupReset.StartRun();
+        // From now on until EndTestRun, every client session (the AL tool's test sessions) starts with ApplicationArea('').
+        LoginAppArea.StartRun();
         Commit();
 
         ALTestSuite.Get(SuiteName);
@@ -165,14 +169,36 @@ codeunit 50100 "BcDevEnv Test Runner"
     /// <summary>
     /// Returns what the state resets of 'bcdevenv run-tests --executor altool' (codeunit 50102) did since the last
     /// PrepareTests, as JSON: tablePresent ("Application Area Setup" exists), baselineRows (-1 without a baseline),
-    /// resets (committed state resets), restores (resets that changed the table), removed, recreated and modified (rows).
+    /// resets (committed state resets), restores (resets that changed the table), removed, recreated and modified (rows),
+    /// and loginSessions (client sessions that got ApplicationArea('') at login, codeunit 50109) and
+    /// loginSessionsWithArea (those that had one set at login).
     /// The counters are written by every reset, so they show that the resets were committed.
     /// </summary>
     procedure GetStateResetSummary(): Text
     var
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
+        LoginAppArea: Codeunit "BcDevEnv Login App Area";
+        Summary: JsonObject;
+        Result: Text;
     begin
-        exit(AppAreaSetupReset.GetSummaryJson());
+        AppAreaSetupReset.AddSummary(Summary);
+        LoginAppArea.AddSummary(Summary);
+        Summary.WriteTo(Result);
+        exit(Result);
+    end;
+
+    /// <summary>
+    /// Ends the test run that PrepareTests started: client sessions that open a company keep the application area they
+    /// get at login again (codeunit 50109). 'bcdevenv run-tests' calls it when the run finishes, also after a failure,
+    /// with either executor. Returns 'ended', or 'not active' when no run was active.
+    /// </summary>
+    procedure EndTestRun(): Text
+    var
+        LoginAppArea: Codeunit "BcDevEnv Login App Area";
+    begin
+        if LoginAppArea.EndRun() then
+            exit('ended');
+        exit('not active');
     end;
 
     local procedure GetSuiteName(TestSuite: Text): Code[10]
