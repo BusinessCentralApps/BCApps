@@ -10,12 +10,27 @@
 // last error, single-instance state and the permissions mock with its assignments carry over from one test
 // codeunit to the next, and from one test method to the next. SessionId() differs in every test codeunit,
 // and an application area set inside one codeunit (by an earlier version of this reset) was not seen in the
-// next. Not observed yet: whether the ApplicationArea('') that 50109 sets at login reaches every codeunit of
-// the invocation (W1 logins had no application area to clear) and whether a work date set inside a codeunit
-// carries over. The reset
+// next. The platform 30.0 server's code agrees (decompiled, not documented): the development test runner
+// creates one session per invocation, opens the company once and runs every test codeunit of the batch in
+// it; single-instance codeunits live in the session's company and nothing resets them between test
+// codeunits (as in the Test Runner's single client session); for every test codeunit the server keeps the
+// session's application area from the codeunit's start and sets it back after its test methods and at its
+// end, rolls back what a codeunit with RequiredTestIsolation None (the default) or Codeunit wrote, in the
+// tenant and the application database (isolated storage too, which is kept in the database), and commits
+// what a Disabled codeunit wrote. Not observed: whether a work date set inside a codeunit carries over
+// (the server's test codeunit runner has no work date handling; the probes saw one work date per job). The reset
 //   * restores "Application Area Setup" to the baseline captured before the first test (codeunit 50108) and
 //     commits (the reset codeunits have RequiredTestIsolation = Disabled), so that a row an earlier test
 //     committed does not give the following logins its application area;
+//   * with System Application Test Library installed (BCDEVENV_SYSAPPTESTLIB), resets single-instance state
+//     of that library that test codeunits set and leave behind: the testability flags of Environment Info
+//     Test Library (SaaS, sandbox, preview, early preview) back to off, and the secret provider and cache of
+//     Azure Key Vault Test Library (ClearSecrets). Shpfy Test Shopify, for example, leaves SaaS on and a mock
+//     key vault whose API version expiry date makes the later Shopify codeunits of the batch fail with "The
+//     Shopify Admin API ... is no longer supported". Single-instance flags of other apps (Subscription
+//     Billing's skip flags, for example) cannot be reset without depending on those apps, and the Shopify
+//     connector's own API version cache (module isolated storage of the Shopify app) cannot be cleared from
+//     here; it stays only when a codeunit with RequiredTestIsolation = Disabled commits it;
 //   * sets up the permissions mock: started without assignments, or with the D365 Full Access base of 130302
 //     (that the base reaches the next codeunit is not verified yet), or stopped;
 //   * runs 130301 and 132553 when present; whether their state reaches the next codeunit is not verified;
@@ -23,18 +38,23 @@
 //     GetLastErrorText failed with an earlier codeunit's error).
 // The reset works per codeunit, not per test method. It records the permissions mock base it applied
 // (committed, isolated storage): when a test method of the codeunit initializes, codeunit 50110 clears the
-// last error and, when it finds the mock stopped (an earlier method stopped it), restarts it with that base
-// through RestartStoppedPermissionsMock, as the Test Runner does before every method.
+// last error, sets the random seed 1, clears the temporary notification context and, when it finds the
+// mock stopped (an earlier method stopped it), restarts it with that base through
+// RestartStoppedPermissionsMock, as the Test Runner does before every method.
 //
 // Optional objects are run through AllObj checks, as 130453 does, so this app gains no dependencies
-// on test libraries. Only the permissions mock is referenced directly; the pipeline compiles that
-// part (preprocessor symbol BCDEVENV_PERMISSIONSMOCK, plus the dependency on "Permissions Mock")
-// only when the Permissions Mock app is installed.
+// on test libraries. Only the permissions mock and System Application Test Library are referenced
+// directly; the pipeline compiles those parts (preprocessor symbols BCDEVENV_PERMISSIONSMOCK and
+// BCDEVENV_SYSAPPTESTLIB, plus the dependency on the app) only when the app is installed.
 namespace BcDevEnv.TestRunner;
 
 using System.Reflection;
 #if BCDEVENV_PERMISSIONSMOCK
 using System.TestLibraries.Security.AccessControl;
+#endif
+#if BCDEVENV_SYSAPPTESTLIB
+using System.TestLibraries.Azure.KeyVault;
+using System.TestLibraries.Environment;
 #endif
 
 codeunit 50102 "BcDevEnv Test State Reset"
@@ -58,7 +78,7 @@ codeunit 50102 "BcDevEnv Test State Reset"
     end;
 
     /// <summary>
-    /// Resets the test state before the next test codeunit: restores "Application Area Setup" and commits, sets up the permissions mock and clears the last error.
+    /// Resets the test state before the next test codeunit: restores "Application Area Setup" and commits, resets the single-instance state of System Application Test Library (when compiled in), sets up the permissions mock and clears the last error.
     /// </summary>
     /// <param name="StartPermissionsMock">true: the permissions mock is (re)started, the state the Test Runner gives every test; false: it is stopped.</param>
     /// <param name="FullAccessBase">With StartPermissionsMock: also run codeunit 130302 "Set State Test Run" (when present), which assigns the D365 Full Access base the Test Runner gives every test method whose TestPermissions is not Disabled; otherwise the mock has no assignments.</param>
@@ -77,6 +97,9 @@ codeunit 50102 "BcDevEnv Test State Reset"
         AppAreaSetupReset.Restore();
         // Keep the restore (and the recorded base) even when a later step fails.
         Commit();
+#if BCDEVENV_SYSAPPTESTLIB
+        ResetSystemApplicationTestLibraries();
+#endif
 
         // codeunit 130301 "Reset State Before Test Run": random seed 1, the legacy permission catalog
         // (which starts the permissions mock) and the temporary notification context.
@@ -162,6 +185,23 @@ codeunit 50102 "BcDevEnv Test State Reset"
             else
                 Base := NoAssignmentsBaseTok;
         IsolatedStorage.Set(MockBaseKeyTok, Base, DataScope::Module);
+    end;
+#endif
+
+#if BCDEVENV_SYSAPPTESTLIB
+    // Single-instance state that tests set through System Application Test Library and do not reset, and that the AL
+    // tool's session keeps for the next test codeunits; back to the state of a new session: no testability flags, no
+    // secret provider (the key vault client initializes again on its next use).
+    local procedure ResetSystemApplicationTestLibraries()
+    var
+        EnvironmentInfoTestLibrary: Codeunit "Environment Info Test Library";
+        AzureKeyVaultTestLibrary: Codeunit "Azure Key Vault Test Library";
+    begin
+        EnvironmentInfoTestLibrary.SetTestabilitySoftwareAsAService(false);
+        EnvironmentInfoTestLibrary.SetTestabilitySandbox(false);
+        EnvironmentInfoTestLibrary.SetTestabilityPreview(false);
+        EnvironmentInfoTestLibrary.SetTestabilityEarlyPreview(false);
+        AzureKeyVaultTestLibrary.ClearSecrets();
     end;
 #endif
 

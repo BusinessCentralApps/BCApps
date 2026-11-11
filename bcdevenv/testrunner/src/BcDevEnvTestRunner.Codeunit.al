@@ -13,8 +13,9 @@
 //                                      codeunit and progress can be reported.
 // PrepareTests also starts a test run for the AL tool executor's state resets (codeunit 50102), which
 // GetStateResetSummary reports on afterwards, and during which every client session that opens a company gets
-// ApplicationArea('') (codeunit 50109) and a test method that initializes with the permissions mock stopped gets it
-// restarted (codeunit 50110) until EndTestRun.
+// ApplicationArea('') (codeunit 50109) and a test method that initializes gets the last error cleared, the random
+// seed 1, the temporary notification context cleared and, with the permissions mock stopped, the mock restarted
+// (codeunit 50110) until EndTestRun.
 //
 // All action parameters are Text (the type proven to round-trip over OData); numeric values are
 // parsed inside the procedures.
@@ -194,7 +195,7 @@ codeunit 50100 "BcDevEnv Test Runner"
     /// <summary>
     /// Ends the test run that PrepareTests started: client sessions that open a company keep the application area they
     /// get at login again (codeunit 50109), and the permissions mock base that the last state reset recorded is
-    /// forgotten (codeunit 50110 no longer restarts a stopped mock). 'bcdevenv run-tests' calls it when the run
+    /// forgotten (codeunit 50110 no longer resets test methods or restarts a stopped mock). 'bcdevenv run-tests' calls it when the run
     /// finishes, also after a failure, with either executor. Returns 'ended', or 'not active' when no run was active.
     /// </summary>
     procedure EndTestRun(): Text

@@ -35,7 +35,7 @@ codeunit 50105 "BcDevEnv State Probe"
         Diagnostic.Append(StrSubstNo('; login hook: %1', LoginAppArea.GetSessionText()));
         Diagnostic.Append(StrSubstNo('; Company=''%1''; User=''%2''; WorkDate=%3', CompanyName(), UserId(), Format(WorkDate(), 0, 9)));
         Diagnostic.Append(StrSubstNo('; PermissionsMock=%1', PermissionsMockState()));
-        Diagnostic.Append(StrSubstNo('; recorded mock base=''%1''; per-method mock restart: %2', TestStateReset.GetPermissionsMockBaseText(), MockRestartState()));
+        Diagnostic.Append(StrSubstNo('; recorded mock base=''%1''; per-method reset: %2; System Application Test Library reset: %3', TestStateReset.GetPermissionsMockBaseText(), MethodResetState(), SystemApplicationTestLibraryResetState()));
         Diagnostic.Append(StrSubstNo('; Application Area Setup: %1', ApplicationAreaSetupRows()));
         Diagnostic.Append(StrSubstNo('; Application Area Setup restores: %1', AppAreaSetupReset.GetSummaryText()));
         Diagnostic.Append(StrSubstNo('; TestPage with that area: %1', ProbePage()));
@@ -150,17 +150,28 @@ codeunit 50105 "BcDevEnv State Probe"
     end;
 #endif
 
-    // Whether codeunit 50110 (restart of a stopped permissions mock on Library - Test Initialize's OnTestInitialize) is compiled.
-    local procedure MockRestartState(): Text
+    // Whether codeunit 50110 (the per-method reset on Library - Test Initialize's OnTestInitialize) is compiled, and with
+    // the restart of a stopped permissions mock.
+    local procedure MethodResetState(): Text
     begin
 #if BCDEVENV_APPTESTLIB
 #if BCDEVENV_PERMISSIONSMOCK
-        exit('compiled');
+        exit('compiled (last error, seed, notification context, stopped mock restart)');
 #else
-        exit('not compiled (Permissions Mock not installed)');
+        exit('compiled (last error, seed, notification context; no mock restart: Permissions Mock not installed)');
 #endif
 #else
         exit('not compiled (Application Test Library not installed)');
+#endif
+    end;
+
+    // Whether the state reset (50102) resets the single-instance state of System Application Test Library.
+    local procedure SystemApplicationTestLibraryResetState(): Text
+    begin
+#if BCDEVENV_SYSAPPTESTLIB
+        exit('compiled');
+#else
+        exit('not compiled (System Application Test Library not installed)');
 #endif
     end;
 

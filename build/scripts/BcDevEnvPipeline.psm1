@@ -44,11 +44,17 @@ $script:DefaultAppTestTimeoutMinutes = 240
 # BcDevEnv Test Runner is compiled against it so its state reset can start and stop the mock.
 $script:PermissionsMockAppId = '40860557-a18d-42ad-aecb-22b7dd80dc80'
 $script:PermissionsMockSymbol = 'BCDEVENV_PERMISSIONSMOCK'
-# Application Test Library (src/Layers/W1/Tests/ApplicationTestLibrary). When it is installed together with
-# Permissions Mock, the runner is also compiled against it, so it can restart a stopped permissions mock on
-# "Library - Test Initialize".OnTestInitialize.
+# Application Test Library (src/Layers/W1/Tests/ApplicationTestLibrary). When it is installed, the runner is
+# also compiled against it, so it can reset every test method that raises "Library - Test Initialize".
+# OnTestInitialize (last error, random seed, notification context) and, with Permissions Mock, restart a
+# stopped permissions mock there.
 $script:ApplicationTestLibraryAppId = 'd852d5d2-a39d-4179-baeb-f99a19e32510'
 $script:ApplicationTestLibrarySymbol = 'BCDEVENV_APPTESTLIB'
+# System Application Test Library (src/System Application/Test Library). When it is installed, the runner's
+# state reset also turns off the testability flags of "Environment Info Test Library" and clears the secrets
+# of "Azure Key Vault Test Library" before every test codeunit.
+$script:SystemApplicationTestLibraryAppId = '9856ae4f-d1a7-46ef-89bb-6ef056398228'
+$script:SystemApplicationTestLibrarySymbol = 'BCDEVENV_SYSAPPTESTLIB'
 # Source of t2embed.dll (font embedding, needed to render reports as PDF), which Windows Server Core
 # lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
 # $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
@@ -1613,12 +1619,12 @@ function Set-BcDevEnvRunnerPermissionsMock {
 
 <#
 .SYNOPSIS
-    When both Application Test Library and Permissions Mock are in the install set (-Apps, Get-BcDevEnvAppInfo
-    objects), makes a copy of the BcDevEnv Test Runner's app.json compile against Application Test Library: adds
-    the dependency and the preprocessor symbol BCDEVENV_APPTESTLIB, which (with BCDEVENV_PERMISSIONSMOCK, see
-    Set-BcDevEnvRunnerPermissionsMock) compiles the runner's restart of a stopped permissions mock on
-    "Library - Test Initialize".OnTestInitialize. Returns the Application Test Library app, or $null (app.json
-    unchanged) when either app is not installed. Idempotent.
+    When Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy of the
+    BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
+    BCDEVENV_APPTESTLIB, which compiles the runner's per-method reset on "Library - Test Initialize".OnTestInitialize
+    (last error, random seed 1, temporary notification context; with BCDEVENV_PERMISSIONSMOCK, see
+    Set-BcDevEnvRunnerPermissionsMock, also the restart of a stopped permissions mock). Returns the Application Test
+    Library app, or $null (app.json unchanged) when it is not installed. Idempotent.
 #>
 function Set-BcDevEnvRunnerApplicationTestLibrary {
     param(
@@ -1628,10 +1634,29 @@ function Set-BcDevEnvRunnerApplicationTestLibrary {
 
     $libraryApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:ApplicationTestLibraryAppId }) | Select-Object -First 1
     if ($null -eq $libraryApp) { return $null }
-    $mockApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:PermissionsMockAppId }) | Select-Object -First 1
-    if ($null -eq $mockApp) { return $null }
 
     Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $libraryApp -Symbol $script:ApplicationTestLibrarySymbol
+    return $libraryApp
+}
+
+<#
+.SYNOPSIS
+    When System Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy
+    of the BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
+    BCDEVENV_SYSAPPTESTLIB, which compiles the state reset's reset of that library's single-instance state (the
+    testability flags of "Environment Info Test Library", the secrets of "Azure Key Vault Test Library"). Returns
+    the System Application Test Library app, or $null (app.json unchanged) when it is not installed. Idempotent.
+#>
+function Set-BcDevEnvRunnerSystemApplicationTestLibrary {
+    param(
+        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [AllowEmptyCollection()] [object[]] $Apps = @()
+    )
+
+    $libraryApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:SystemApplicationTestLibraryAppId }) | Select-Object -First 1
+    if ($null -eq $libraryApp) { return $null }
+
+    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $libraryApp -Symbol $script:SystemApplicationTestLibrarySymbol
     return $libraryApp
 }
 

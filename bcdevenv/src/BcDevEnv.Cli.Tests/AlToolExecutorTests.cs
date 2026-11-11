@@ -806,37 +806,46 @@ public class AlToolExecutorTests
     }
 
     [Fact]
-    public void Test_initialize_clears_the_last_error_and_restarts_a_stopped_permissions_mock_with_the_recorded_base_while_a_run_is_active()
+    public void Test_initialize_resets_the_last_error_seed_and_notification_context_and_restarts_a_stopped_permissions_mock_while_a_run_is_active()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvMockRestart.Codeunit.al"))) dir = dir.Parent;
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvTestMethodReset.Codeunit.al"))) dir = dir.Parent;
         Assert.NotNull(dir);
         string Read(string file) => File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", file));
-        var restart = Read("BcDevEnvMockRestart.Codeunit.al");
+        var methodReset = Read("BcDevEnvTestMethodReset.Codeunit.al");
         var reset = Read("BcDevEnvTestStateReset.Codeunit.al");
         var runner = Read("BcDevEnvTestRunner.Codeunit.al");
         var login = Read("BcDevEnvLoginAppArea.Codeunit.al");
 
-        // Compiled only when both Application Test Library and Permissions Mock are installed: everything but the
-        // header comment is inside both guards.
-        var code = Regex.Replace(restart, @"(?m)^\s*//[^\r\n]*\r?\n", "").Trim();
-        Assert.Matches(@"^#if BCDEVENV_APPTESTLIB\r?\n#if BCDEVENV_PERMISSIONSMOCK\r?\n", code);
-        Assert.Matches(@"\r?\n#endif\r?\n#endif$", code);
-        Assert.Matches(@"codeunit 50110 ""BcDevEnv Mock Restart""", code);
+        // Compiled only when Application Test Library is installed: everything but the header comment is inside that
+        // guard; the restart of a stopped mock (and its using) also needs Permissions Mock.
+        var code = Regex.Replace(methodReset, @"(?m)^\s*//[^\r\n]*\r?\n", "").Trim();
+        Assert.Matches(@"^#if BCDEVENV_APPTESTLIB\r?\nnamespace ", code);
+        Assert.Matches(@"\r?\n\}\r?\n#endif$", code);
+        Assert.Matches(@"#if BCDEVENV_PERMISSIONSMOCK\r?\nusing System\.TestLibraries\.Security\.AccessControl;\r?\n#endif\r?\n", code);
+        Assert.Matches(@"codeunit 50110 ""BcDevEnv Test Method Reset""", code);
 
         var subscriber = Regex.Match(code,
             @"\[EventSubscriber\(ObjectType::Codeunit, Codeunit::""Library - Test Initialize"", OnTestInitialize, '', false, false\)\]\s+" +
             @"local procedure \w+\(CallerCodeunitID: Integer\)(?<body>.*?)\r?\n    end;", RegexOptions.Singleline);
         Assert.True(subscriber.Success);
         var body = subscriber.Groups["body"].Value;
-        var restartCall = body.IndexOf("TestStateReset.RestartStoppedPermissionsMock();", StringComparison.Ordinal);
-        var startedExit = body.IndexOf("if PermissionsMock.IsStarted() then", StringComparison.Ordinal);
-        var runActiveExit = body.IndexOf("if not LoginAppArea.IsRunActive() then", StringComparison.Ordinal);
-        var clearLastError = body.IndexOf("ClearLastError();", StringComparison.Ordinal);
-        Assert.InRange(startedExit, 0, restartCall);
-        Assert.InRange(runActiveExit, 0, restartCall);
-        // The last error is cleared in every initializing method of a run, also when the mock is started.
-        Assert.InRange(clearLastError, runActiveExit, startedExit);
+        int At(string text) => body.IndexOf(text, StringComparison.Ordinal);
+        var runActiveExit = At("if not LoginAppArea.IsRunActive() then");
+        var clearLastError = At("ClearLastError();");
+        var setSeed = At("LibraryRandom.SetSeed(1);");
+        var clearNotifications = At("LibraryNotificationMgt.ClearTemporaryNotificationContext();");
+        var mockGuard = body.LastIndexOf("#if BCDEVENV_PERMISSIONSMOCK", StringComparison.Ordinal);
+        var startedExit = At("if PermissionsMock.IsStarted() then");
+        var restartCall = At("TestStateReset.RestartStoppedPermissionsMock();");
+        // Every initializing method of a run gets the last error cleared, seed 1 and no temporary notifications (as
+        // 130453 and 130301 do before every method), also when the mock is started or not compiled in.
+        Assert.True(runActiveExit >= 0 && runActiveExit < clearLastError && clearLastError < setSeed && setSeed < clearNotifications
+            && clearNotifications < mockGuard && mockGuard < startedExit && startedExit < restartCall,
+            $"Unexpected order in the OnTestInitialize subscriber:{Environment.NewLine}{body}");
+        Assert.Contains("#endif", body[restartCall..]);
+        Assert.Contains(@"LibraryRandom: Codeunit ""Library - Random"";", body);
+        Assert.Contains(@"LibraryNotificationMgt: Codeunit ""Library - Notification Mgt."";", body);
         // A started mock keeps the assignments the test made before its Initialize.
         Assert.DoesNotMatch(@"ClearAssignments|\.Set\(|\.Assign\(|\.Stop\(\)|\.Start\(\)", code);
         Assert.Matches(@"\r?\n    procedure IsRunActive\(\): Boolean", login);
@@ -858,6 +867,33 @@ public class AlToolExecutorTests
         var prepare = AlProcedure(runner, @"procedure PrepareTests\([^)]*\): Text");
         Assert.InRange(prepare.IndexOf("TestStateReset.ClearPermissionsMockBase();", StringComparison.Ordinal), 0, prepare.IndexOf("Commit();", StringComparison.Ordinal));
         Assert.Contains("TestStateReset.ClearPermissionsMockBase();", AlProcedure(runner, $@"procedure {NavTestService.EndTestRunAction}\(\): Text"));
+    }
+
+    [Fact]
+    public void The_state_reset_turns_off_the_system_application_test_library_flags_before_every_codeunit_when_compiled_in()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvTestStateReset.Codeunit.al"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var reset = File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", "BcDevEnvTestStateReset.Codeunit.al")).ReplaceLineEndings("\r\n");
+
+        // Only with System Application Test Library installed (BCDEVENV_SYSAPPTESTLIB): the usings, the call and the procedure.
+        Assert.Contains("#if BCDEVENV_SYSAPPTESTLIB\r\nusing System.TestLibraries.Azure.KeyVault;\r\nusing System.TestLibraries.Environment;\r\n#endif\r\n", reset);
+        var resetProcedure = AlProcedure(reset, @"procedure Reset\(StartPermissionsMock: Boolean; FullAccessBase: Boolean\)");
+        var call = resetProcedure.IndexOf("#if BCDEVENV_SYSAPPTESTLIB\r\n        ResetSystemApplicationTestLibraries();\r\n#endif", StringComparison.Ordinal);
+        // After the committed restore (so a failing setter cannot undo it) and with the mock still stopped, before 130301.
+        Assert.InRange(resetProcedure.IndexOf("Commit();", StringComparison.Ordinal), 0, call);
+        Assert.True(call >= 0 && call < resetProcedure.IndexOf("RunIfPresent(130301);", StringComparison.Ordinal));
+
+        var procedureAt = reset.IndexOf("local procedure ResetSystemApplicationTestLibraries()", StringComparison.Ordinal);
+        var guardAt = reset.LastIndexOf("#if BCDEVENV_SYSAPPTESTLIB", procedureAt, StringComparison.Ordinal);
+        Assert.InRange(guardAt, 0, procedureAt);
+        Assert.DoesNotContain("#endif", reset[guardAt..procedureAt]);
+        var procedure = AlProcedure(reset, @"local procedure ResetSystemApplicationTestLibraries\(\)");
+        foreach (var flag in new[] { "SoftwareAsAService", "Sandbox", "Preview", "EarlyPreview" })
+            Assert.Contains($"EnvironmentInfoTestLibrary.SetTestability{flag}(false);", procedure);
+        Assert.Contains("AzureKeyVaultTestLibrary.ClearSecrets();", procedure);
+        Assert.StartsWith("\r\n#endif", reset[(procedureAt + reset[procedureAt..].IndexOf("\r\n    end;", StringComparison.Ordinal) + "\r\n    end;".Length)..]);
     }
 
     // The body (from the line after the signature to the procedure's "end;") of an AL procedure at the top level of an object.

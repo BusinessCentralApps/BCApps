@@ -140,16 +140,22 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
                             as the Test Runner does before every method. Before every test
                             codeunit a BcDevEnv Test Runner codeunit resets the state that
                             carries over: it restores the Application Area Setup table to its
-                            state before the first test and commits it, runs codeunits
-                            130301/132553 when present and clears the last error. on (default):
+                            state before the first test and commits it, turns off the
+                            testability flags (SaaS, sandbox, preview, early preview) of
+                            Environment Info Test Library and clears the secrets of Azure Key
+                            Vault Test Library when System Application Test Library is
+                            installed, runs codeunits 130301/132553 when present and clears the
+                            last error. on (default):
                             the permissions mock is then started: without assignments for
                             codeunits whose TestPermissions is Disabled, otherwise with the
                             D365 Full Access base of codeunit 130302 (when present), as the
                             Test Runner does per method; off: it is stopped. When Application
-                            Test Library and Permissions Mock are installed, a test method whose
-                            Initialize raises Library - Test Initialize's OnTestInitialize gets
-                            the last error cleared and, when the mock is stopped, the mock
-                            restarted with its codeunit's base (a started mock is left as it
+                            Test Library is installed, a test method whose Initialize raises
+                            Library - Test Initialize's OnTestInitialize gets the last error
+                            cleared, the random seed 1 and the temporary notification context
+                            cleared, as the Test Runner does per method, and, when Permissions
+                            Mock is installed too and the mock is stopped, the mock restarted
+                            with its codeunit's base (a started mock is left as it
                             is). A failed reset is an infrastructure error. The restores and the
                             sessions whose login ApplicationArea was cleared are logged as
                             "State reset: ..." after the run.
@@ -157,7 +163,8 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
                             runs first in every batch, before the first reset; it always fails and
                             its message (ApplicationArea and the login hook, session,
                             Application Area Setup and its restores, TestPage control
-                            visibility, permissions mock and its recorded base, work date) is
+                            visibility, permissions mock and its recorded base, the compiled
+                            per-method and System Application Test Library resets, work date) is
                             logged as "State probe: ...". It is not a test result.
 
   Runner call failures and disabled-test violations fail the command even with --allow-failures.

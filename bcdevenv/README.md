@@ -222,7 +222,21 @@ not taken from server documentation:
 - an `ApplicationArea('')` that a reset codeunit set was not seen by the next codeunit,
   which had the application area that `Application Area Setup` gives (a committed
   `#BasicHR` row);
-- whether the work date carries over is not verified; committed data does.
+- whether the work date carries over is not verified (the probes saw one work date per
+  job); committed data does.
+
+The platform 30.0 server's code agrees (decompiled from the service tier, not
+documented): its development test runner creates one session per AL tool invocation,
+opens the company once and runs every test codeunit of the batch in it.
+Single-instance codeunits belong to that session's company and nothing resets them
+between test codeunits — as in the single client session of the Test Runner. For every
+test codeunit the server keeps the session's application area from the codeunit's start
+and sets it back after its test methods and at its end (so an application area set
+inside a codeunit does not reach the next one), and it rolls back what a codeunit with
+`RequiredTestIsolation` `None` (the default) or `Codeunit` wrote, in the tenant and the
+application database — isolated storage included, which is kept in the database —
+while a `Disabled` codeunit's writes are committed. It has no work date, random seed or
+last error handling.
 
 So the AL tool runs a reset test codeunit of the `BcDevEnv Test Runner` app before
 **every** test codeunit of every batch and isolation pass: with `--permissions-mock on` (default)
@@ -255,12 +269,27 @@ reaches the next test codeunit:
   at login, so `TestPage` controls with `ApplicationArea = Basic, Suite` are "not found
   on the page". The Test Runner does not need this: it clears the application area
   before every method;
+- with `System Application Test Library` installed, turns off the testability flags
+  of codeunit 135094 `Environment Info Test Library` (`SetTestabilitySoftwareAsAService`,
+  `SetTestabilitySandbox`, `SetTestabilityPreview`, `SetTestabilityEarlyPreview`, all
+  `false`, the state of a new session) and clears the secret provider and cache of
+  codeunit 135210 `Azure Key Vault Test Library` (`ClearSecrets`). Both libraries keep
+  their state in single-instance codeunits of the System Application, which carries over
+  within a batch, and tests set them without resetting them: `Shpfy Test Shopify` (used
+  by `UnitTestBlockOutOfSupportAPI` in 139563) turns SaaS on and installs a mock key
+  vault, after which the next Shopify codeunits of the batch read an API version expiry
+  date of today and fail with "The Shopify Admin API used by your current Shopify
+  connector is no longer supported". The Test Runner does not reset them either; why
+  upstream runs do not show this cascade is not verified. This goes beyond what 130453
+  and 130301 do. Compiled only when the library is installed (preprocessor symbol
+  `BCDEVENV_SYSAPPTESTLIB`, see [Known differences](#bcapps-ci-pipeline));
 - runs codeunit 130301 `Reset State Before Test Run` (random seed 1, the legacy
   permission catalog, the temporary notification context) and codeunit 132553
   `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
   does, so the runner app does not depend on test libraries). What 130301 resets is
   single-instance state like the mock's; that it reaches the next test codeunit is not
-  verified individually;
+  verified individually. The Test Runner runs 130301 before every method; codeunit 50110
+  (below) repeats its random seed and notification context reset per method;
 - leaves the `Permissions Mock` (codeunit 131006) **started** (`on`; the previous
   codeunit's mock and its assignments are disposed first) or **stopped** (`off`). When
   started, the mock has **no permission set assignments** before codeunits whose
@@ -293,27 +322,37 @@ base, with a warning; a codeunit without a value (an older runner app) gets 5010
 base), with a warning. The plan line shows the split: `… (permissions mock started; N
 codeunit(s) with the D365 Full Access base, M without assignments)`.
 
-**Per-method last error and stopped mock (`altool`).** The Test Runner clears the last
-error and starts a fresh mock before every test method; the reset runs only before the
-codeunit. The last error of a failed method reached the next methods of its codeunit
-(their `GetLastErrorText()` checks failed with it nested in their own message), and a
-method that stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for
+**Per-method last error, random seed and stopped mock (`altool`).** The Test Runner
+clears the last error, runs 130301 (random seed 1, a fresh mock, no temporary
+notifications) and, for methods whose `TestPermissions` is not `Disabled`, 130302 before
+every test method; the reset runs only before the codeunit. The last error of a failed
+method reached the next methods of its codeunit (their `GetLastErrorText()` checks
+failed with it nested in their own message); the random sequence of `Library - Random`
+(single-instance, seeded with 1 by the reset) went on from method to method, so the
+values a method drew depended on the methods that ran before it; and a method that
+stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for
 example in `Expense Permissions Test`) left it stopped for the later methods of its
 codeunit, whose `Library - Lower Permissions` calls then did nothing
 (`SetExactPermissionSet` exits when the mock is not started), so they ran as SUPER.
 Each reset now records the base it applied (no assignments, D365 Full Access, or
-stopped) in isolated storage, committed with its restore. Codeunit 50110 subscribes to
-`OnTestInitialize` of codeunit 132250 `Library - Test Initialize`, which test methods
-raise first in their `Initialize()`, and, while a run is active, clears the last error
-(as 130453's `BeforeTestMethod` does) and, when the mock is
-stopped, restarts it with that base: 130301 for no assignments, 130301 and then 130302
-for the D365 Full Access base, nothing when the reset stopped the mock (`off`). A
-started mock is never touched, so the assignments a test makes before its
-`Initialize()` (`SetOutsideO365Scope`, `SetO365BusFull`) stay. `PrepareTests` and
+stopped) in isolated storage, committed with its restore. Codeunit 50110 `BcDevEnv Test
+Method Reset` subscribes to `OnTestInitialize` of codeunit 132250 `Library - Test
+Initialize`, which test methods raise first in their `Initialize()`, and, while a run is
+active, clears the last error (as 130453's `BeforeTestMethod` does), sets the random
+seed 1 (`Library - Random`'s `SetSeed(1)`) and clears the temporary notification context
+(`Library - Notification Mgt.`'s `ClearTemporaryNotificationContext`), as 130301 does,
+and, when the mock is stopped, restarts it with that base: 130301 for no assignments,
+130301 and then 130302 for the D365 Full Access base, nothing when the reset stopped the
+mock (`off`). A started mock is never touched, so the assignments a test makes before
+its `Initialize()` (`SetOutsideO365Scope`, `SetO365BusFull`) stay. `PrepareTests` and
 `EndTestRun` forget the base, so nothing is restarted outside a run or before its first
-reset. The subscriber is compiled only when `Application Test Library` and
-`Permissions Mock` are both installed (see [Known differences](#bcapps-ci-pipeline));
-the state probe shows the recorded base and whether it is compiled.
+reset. The reset happens at `Initialize()`, not before the method: random values a
+method draws before its `Initialize()` are drawn again after it, and methods that do not
+raise `OnTestInitialize` (for example the Sustainability and Shopify tests) get none of
+it. The subscriber is compiled when
+`Application Test Library` is installed; the restart of a stopped mock only when
+`Permissions Mock` is installed as well (see [Known differences](#bcapps-ci-pipeline));
+the state probe shows the recorded base and what is compiled.
 
 The reset codeunits are never selected as tests (`PrepareTests` drops them), and
 their results are not counted, not written to the JUnit report and not matched against
@@ -344,8 +383,10 @@ to the platform's `Company Triggers` `OnCompanyOpenCompleted`, which is raised a
 (`GuiAllowed`) that opens a company **while a test run is active**: from `PrepareTests`
 until the CLI calls the runner's `EndTestRun` when `run-tests` finishes (also after a
 failure). The AL tool's login is such a session, so the batch starts with the empty
-application area before its first codeunit runs; that it reaches every test codeunit of
-the batch is not verified yet (no W1 login had an application area to clear). Only the
+application area before its first codeunit runs. That it reaches every test codeunit of
+the batch follows from the server's code above (every codeunit starts with the
+application area the previous one started with); it is not observed yet (no W1 login
+had an application area to clear). Only the
 session changes, never the table: tests that read `Application Area Setup` (for example
 the fallback to it when the session's application area is empty) keep the standard
 semantics. The runner's OData sessions are not client sessions and are not affected.
@@ -538,11 +579,15 @@ codeunit 130453 `ALTestRunner Reset Environment`) do not run. The state reset (s
 method**. The methods of a test codeunit run one after the other in the AL tool's
 session, so the following still carries over from one method to the next:
 
-- the session state a method changes: application area, work date and notification
-  context, and the random sequence (the Test Runner reseeds with 1 before every method;
-  here 130301 seeds it with 1 before the codeunit, in the reset, and again only in a
-  method whose `Initialize()` finds the mock stopped; the login hook clears the
-  application area once per login, where the Test Runner clears it before every method);
+- the session state a method changes: application area and work date (the login hook
+  clears the application area once per login, where the Test Runner clears it before
+  every method);
+- the random sequence and the temporary notification context, in methods that do not
+  raise `OnTestInitialize` or before their `Initialize()`: codeunit 50110 sets the seed 1
+  and clears the context there (see [Running tests](#running-tests)), the Test Runner
+  (130301) before every method. A method without `OnTestInitialize` goes on with the
+  sequence that the reset seeded with 1 before the codeunit, so the values it draws
+  depend on the methods that ran before it in the codeunit;
 - the last error, in methods that do not raise `OnTestInitialize` or before their
   `Initialize()`: codeunit 50110 clears it there (see [Running tests](#running-tests)),
   the Test Runner before every method. A codeunit without `OnTestInitialize` — for
@@ -568,7 +613,37 @@ codeunits, as with the Test Runner. The AL tool logs in again for every batch, a
 login computes the session's state from such data (except the application area, which
 the login hook clears), which the Test Runner's single login does not. The work date
 that 130453 restores after every codeunit is not restored here; whether a work date
-that a codeunit sets reaches the next codeunit of its batch is not verified.
+that a codeunit sets reaches the next codeunit of its batch is not verified (the probes
+saw one work date per job).
+
+Single-instance state also carries over between the test codeunits of a batch (one
+session, see [Running tests](#running-tests)). The reset resets only the state of
+`System Application Test Library` (Environment Info testability flags, Azure Key Vault
+secrets), and only when that app is installed: the action then adds the dependency and
+the `BCDEVENV_SYSAPPTESTLIB` symbol to its copy of the runner's `app.json`, and logs
+it. Single-instance state of other apps is not reset, because the runner does not
+depend on them, and module isolated storage of another app cannot be cleared from the
+runner. Known cases, from the CI failures (cause not verified for each test):
+
+- Subscription Billing's `Document Change Management` sets its single-instance
+  `SkipContractSalesHeaderModifyCheck`/`SkipContractPurchaseHeaderModifyCheck` flags
+  before a document copy and resets them after it, so an error in between leaves them
+  set for the later codeunits (139692 ×2, 148157, 139912, 139913: `asserterror`
+  without an error);
+- the Shopify connector caches the API version expiry date in its module isolated
+  storage for 10 days. An isolated codeunit's write is rolled back with the codeunit,
+  but one that a codeunit with `RequiredTestIsolation = Disabled` commits stays for the
+  later codeunits; the reset cannot clear it;
+- without `OnTestInitialize` there is no per-method seed (see above): the Sustainability
+  tests 148184, 148186, 148187, 148190 and 148206 fail in ways that look
+  seed-dependent;
+- 139624 and 139657 fail with `asserterror` raising no error; no cause in the runner has
+  been found.
+
+A generic fix for single-instance state would be one AL tool invocation per test
+codeunit, so that every codeunit gets a new session. It is not implemented: every
+codeunit would pay for a connection and a company open, and the Test Runner also runs
+all codeunits in one session.
 
 The D365 Full Access base (codeunit 130302) is chosen per codeunit from its first
 selected method's `TestPermissions` (see [Running tests](#running-tests)); it needs
@@ -583,20 +658,21 @@ mock part with the action input `testPermissionsMock` or the AL-Go setting
 `bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
 both.
 
-The per-method part (codeunit 50110: the last error, the restart of a stopped mock) is
-compiled only when `Application Test Library` is in the install set as well: the action
-then also adds that dependency and the `BCDEVENV_APPTESTLIB` symbol, and logs it, so
-projects without it (System Application, Business Foundation) are unaffected. It
-covers only methods that raise `OnTestInitialize` (in practice through their
-`Initialize()`), and it runs there, not before the method: calls that a method makes on
-the stopped mock before its `Initialize()` (for example `SetOutsideO365Scope`) do
-nothing, and the mock then starts with the base; an error that a method raises and
-catches before its `Initialize()` is cleared there; a method that stops the mock and
-calls `Initialize()` again gets it restarted; and 130301's random seed 1 and
-notification context reset happen at that point, only in methods that found the mock
-stopped. Its order among other `OnTestInitialize` subscribers is not defined. The
-restarts are not counted: a count written in the test's session would be rolled back by
-its test isolation, and a commit there would change the test's transaction.
+The per-method part (codeunit 50110: the last error, the random seed, the temporary
+notification context) is compiled only when `Application Test Library` is in the install
+set: the action then also adds that dependency and the `BCDEVENV_APPTESTLIB` symbol, and
+logs it, so projects without it (System Application, Business Foundation) are
+unaffected. Its restart of a stopped mock also needs `Permissions Mock`
+(`BCDEVENV_PERMISSIONSMOCK`). It covers only methods that raise `OnTestInitialize` (in
+practice through their `Initialize()`), and it runs there, not before the method: calls
+that a method makes on the stopped mock before its `Initialize()` (for example
+`SetOutsideO365Scope`) do nothing, and the mock then starts with the base; an error that
+a method raises and catches before its `Initialize()` is cleared there; random values a
+method draws before its `Initialize()` are drawn again after it; and a method that stops
+the mock and calls `Initialize()` again gets it restarted. Its order among other
+`OnTestInitialize` subscribers is not defined. The restarts are not counted: a count
+written in the test's session would be rolled back by its test isolation, and a commit
+there would change the test's transaction.
 
 The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
 `OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are
