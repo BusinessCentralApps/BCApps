@@ -97,7 +97,7 @@ Write-Host "Company setup: $(if (@($plan.CompanyCodeunits).Count) { $plan.Compan
 foreach ($pass in $plan.Passes) { Write-Host "Test pass:     $($pass.Name), test runner $($pass.RunnerId)" }
 $executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes -PermissionsMock $TestPermissionsMock -StateProbe $TestStateProbe
 $executorLabel = if ($executor.Executor -eq 'altool') { "altool $($executor.AlToolVersion)" } else { 'odata' }
-$permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started without assignments)' } else { 'off (stopped)' }
+$permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started; with the D365 Full Access base unless TestPermissions is Disabled)' } else { 'off (stopped)' }
 if ($plan.Action -eq 'Test') {
     if ($executor.Executor -eq 'altool') {
         Write-Host "Test executor: altool - AL tool $($executor.AlToolVersion) runtests (client session, development endpoint port $devPort), $($executor.AppTimeoutMinutes) min per test app and pass; the BcDevEnvTestRunner selects the tests"

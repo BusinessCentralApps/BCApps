@@ -209,17 +209,19 @@ With `per-codeunit`, `--executor` chooses who runs the selected tests:
 **State reset (`altool`).** The server's development test runner raises none of the
 `Test Runner` hooks that reset the session around every test method, so the AL tool
 runs a reset test codeunit of the `BcDevEnv Test Runner` app before **every** test
-codeunit of every batch and isolation pass:
-codeunit 50103 `BcDevEnv Reset Mock Started` with `--permissions-mock on` (default),
-50104 `BcDevEnv Reset Mock Stopped` with `--permissions-mock off`. The server rejects a
+codeunit of every batch and isolation pass: with `--permissions-mock on` (default)
+codeunit 50103 `BcDevEnv Reset Mock Started` before test codeunits whose
+`TestPermissions` is `Disabled` and 50106 `BcDevEnv Reset Full Access` before all
+others; with `--permissions-mock off` 50104 `BcDevEnv Reset Mock Stopped`. The server rejects a
 run that selects the same codeunit/method pair twice ("Test case name '…' is not
 unique"), so each reset codeunit has 50 identical test methods `ResetTestState01` …
-`ResetTestState50` and the n-th reset of a batch selects method n
-(`--testgroups [{R,[ResetTestState01]}, c1, {R,[ResetTestState02]}, c2, …]`); this is
-why a batch holds at most 50 codeunits. Both codeunits call codeunit
+`ResetTestState50` and the n-th reset of a batch selects method n of the reset codeunit
+that position uses
+(`--testgroups [{R1,[ResetTestState01]}, c1, {R2,[ResetTestState02]}, c2, …]`); this is
+why a batch holds at most 50 codeunits. The reset codeunits call codeunit
 50102 `BcDevEnv Test State Reset`, which mirrors codeunit 130453 `ALTestRunner Reset
-Environment` (`BeforeTestMethod`/`AfterCodeunitRun`) and the permissions mock handling
-of `Test Runner - Mgt`:
+Environment` (`BeforeTestMethod`, `ClearLegacyLibraries`, `AfterCodeunitRun`) and the
+permissions mock handling of `Test Runner - Mgt`:
 
 - `ClearLastError()` and `ApplicationArea('')`;
 - restores the work date the session had at the first reset;
@@ -227,9 +229,27 @@ of `Test Runner - Mgt`:
   permission catalog, the temporary notification context) and codeunit 132553
   `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
   does, so the runner app does not depend on test libraries);
-- leaves the `Permissions Mock` (codeunit 131006) **started without permission set
-  assignments** (`on`, the state the real runner gives every test method; the previous
-  codeunit's mock and its assignments are disposed first) or **stopped** (`off`).
+- leaves the `Permissions Mock` (codeunit 131006) **started** (`on`; the previous
+  codeunit's mock and its assignments are disposed first) or **stopped** (`off`). When
+  started, the mock has **no permission set assignments** before codeunits whose
+  `TestPermissions` is `Disabled` (50103) and the **D365 Full Access base** before all
+  others (50106): codeunit 130302 `Set State Test Run` of `Tests-TestLibraries` (when
+  installed), which the real runner runs after 130301 before every method whose
+  `TestPermissions` is not `Disabled` (`Restrictive` and `NonRestrictive` alike). It
+  assigns `D365 Full Access` with `All Objects`, `Test Tables`, `D365 Basic` and
+  `LOCAL` (when present), the base that `Library - Lower Permissions` lowers from.
+  With the mock off, 130302 never runs.
+
+The value comes from `PrepareTests`: while it selects the tests, it records the
+`TestPermissions` that codeunit 130452 `Test Runner - Get Methods` reports for every
+method (its `OnGetTestMethods` event, the value the Test Runner gets when the method
+runs; `Restrictive` when the codeunit does not set the property) and returns, per
+codeunit, the value of its first selected method (`testPermissions`, and
+`testPermissionsMixed` when its selected methods differ). The reset runs once per
+codeunit, so a codeunit whose selected methods differ gets its first selected method's
+base, with a warning; a codeunit without a value (an older runner app) gets 50103 (no
+base), with a warning. The plan line shows the split: `… (permissions mock started; N
+codeunit(s) with the D365 Full Access base, M without assignments)`.
 
 The reset codeunits are never selected as tests (`PrepareTests` drops them), and
 their results are not counted, not written to the JUnit report and not matched against
@@ -241,8 +261,8 @@ what the reset does not cover.
 
 **State probe (`altool`, diagnostic, off by default).** With `--state-probe on`, the
 AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, right after
-the first state reset (`[{R,[ResetTestState01]}, {50105,[ProbeState]}, c1,
-{R,[ResetTestState02]}, c2, …]`), so it sees the session state the batch's first test
+the first state reset (`[{R1,[ResetTestState01]}, {50105,[ProbeState]}, c1,
+{R2,[ResetTestState02]}, c2, …]`), so it sees the session state the batch's first test
 codeunit starts with. Its only test method always fails with one diagnostic line,
 which the CLI logs as `State probe: <batch>: …`: `ApplicationArea()`, the session id,
 client type and `GuiAllowed`, the company, user and work date, the permissions mock
@@ -421,19 +441,19 @@ the next:
 - the application area, work date, last error, random seed and notification context
   a method changes;
 - permission set assignments a method makes (`PermissionsMock.Set`,
-  `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method,
-  so with the mock on, a later method of the same codeunit may run with an earlier
-  method's lowered permissions, and tests that passed only because they ran as SUPER
-  may now fail. With the mock off (stopped), permission tests run as SUPER and
+  `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method
+  (and, unless the method's `TestPermissions` is `Disabled`, assigns the D365 Full
+  Access base again), so with the mock on, a later method of the same codeunit may run
+  with the permissions an earlier method lowered or assigned instead of the base, and
+  tests that passed only because they ran as SUPER may now fail. With the mock off
+  (stopped), permission tests run as SUPER and
   `PermissionsMock.ClearAssignments` without `Start` fails ("A DotNet variable has not
   been instantiated"), as before the reset existed (about 31 + 8 failures per job).
 
-Codeunit 130302 `Set Restrictive Permissions` (the restrictive permission catalog the
-real runner sets before methods whose `TestPermissions` is not `Disabled`) is **not**
-run: the method's `TestPermissions` is unknown at codeunit granularity, `Disabled`
-methods need unrestricted permissions, and its catalog would only last until the
-first permission lowering of the codeunit. So the tests do not detect missing
-permissions beyond those the tests lower themselves. Codeunit 132553 is in `Prevent
+The D365 Full Access base (codeunit 130302) is chosen per codeunit from its first
+selected method's `TestPermissions` (see [Running tests](#running-tests)); it needs
+`Tests-TestLibraries` in the install set, otherwise those codeunits also start without
+assignments. Codeunit 132553 is in `Prevent
 Metadata Updates Library`, which the pipeline does not publish, so it normally does
 not run. The mock part is compiled into the runner only when the `Permissions Mock`
 app is in the install set (the action adds the dependency and the
@@ -441,7 +461,19 @@ app is in the install set (the action adds the dependency and the
 `app.json`, and logs it); otherwise the reset does not control the mock. Switch the
 mock part with the action input `testPermissionsMock` or the AL-Go setting
 `bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
-both. Sending a non-empty
+both.
+
+The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
+`OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are
+local integration events, so nothing outside codeunit 130454 can raise them, and the
+reset cannot stand in for their subscribers. In `src\Apps`, System Application,
+Business Foundation, `src\Tools` and `src\Layers\W1\Tests` the only subscriber outside
+the `Test Runner` app is Quality Management's codeunit 139979 `Qlty. Permission Test
+Fixture`, which creates the test users of codeunit 139957 in `OnBeforeCodeunitRun`;
+without them, 9 of its tests fail with "The given key was not present in the
+dictionary."
+
+Sending a non-empty
 method list (codeunits with some methods disabled) has not been verified against a
 live server yet. With `testExecutor: odata` the tests run in a web-service session
 instead, where `TestPage`s, report request pages and UI handlers fail with

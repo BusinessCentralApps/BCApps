@@ -73,8 +73,10 @@ inputs:
   testPermissionsMock:
     description: >-
       altool executor: the state of the permissions mock (Permissions Mock, codeunit 131006) set by the
-      state reset that runs before every test codeunit. on starts it without assignments (as the Test
-      Runner does before every test method), off stops it. Only applies when Permissions Mock is installed.
+      state reset that runs before every test codeunit. on starts it, as the Test Runner does before every
+      test method - without assignments for codeunits whose TestPermissions is Disabled, otherwise with the
+      D365 Full Access base of codeunit 130302 Set State Test Run (when installed); off stops it. Only
+      applies when Permissions Mock is installed.
       Empty uses the AL-Go setting bcdevenvTestPermissionsMock, else on.
     required: false
     default: ''

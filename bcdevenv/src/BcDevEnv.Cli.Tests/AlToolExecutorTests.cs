@@ -139,6 +139,9 @@ public class AlToolExecutorTests
             },
             XUnitResultParser.Parse(FakeRunnerHandler.XUnit(id, name, tests)), true);
 
+    private static NavTestService.PreparedCodeunit WithTestPermissions(NavTestService.PreparedCodeunit prepared, string? value) =>
+        prepared with { Codeunit = prepared.Codeunit with { TestPermissions = value } };
+
     private static NavTestService.PreparedSuite Suite(params NavTestService.PreparedCodeunit[] codeunits) =>
         new(new NavTestService.TestSuitePlan
             {
@@ -342,6 +345,148 @@ public class AlToolExecutorTests
     }
 
     [Theory]
+    [InlineData(false, "Restrictive", AlToolTestRunner.ResetMockStoppedCodeunitId)]
+    [InlineData(false, "Disabled", AlToolTestRunner.ResetMockStoppedCodeunitId)]
+    [InlineData(false, null, AlToolTestRunner.ResetMockStoppedCodeunitId)]
+    [InlineData(true, null, AlToolTestRunner.ResetMockStartedCodeunitId)]
+    [InlineData(true, " ", AlToolTestRunner.ResetMockStartedCodeunitId)]
+    [InlineData(true, "Disabled", AlToolTestRunner.ResetMockStartedCodeunitId)]
+    [InlineData(true, " disabled ", AlToolTestRunner.ResetMockStartedCodeunitId)]
+    [InlineData(true, "Restrictive", AlToolTestRunner.ResetFullAccessCodeunitId)]
+    [InlineData(true, "NonRestrictive", AlToolTestRunner.ResetFullAccessCodeunitId)]
+    public void The_state_reset_codeunit_follows_the_permissions_mock_and_the_TestPermissions(bool permissionsMock, string? testPermissions, int expected) =>
+        Assert.Equal(expected, AlToolTestRunner.StateResetCodeunitId(permissionsMock, testPermissions));
+
+    [Fact]
+    public void Codeunits_whose_TestPermissions_is_not_Disabled_get_the_D365_Full_Access_reset()
+    {
+        const int started = AlToolTestRunner.ResetMockStartedCodeunitId;
+        const int full = AlToolTestRunner.ResetFullAccessCodeunitId;
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(
+            WithTestPermissions(Prepared(50001, "A", true, Pending("T")), "Disabled"),
+            WithTestPermissions(Prepared(50002, "B", true, Pending("T")), "Restrictive"),
+            WithTestPermissions(Prepared(50003, "C", true, Pending("T")), "NonRestrictive"),
+            Prepared(50004, "D", true, Pending("T")),
+            WithTestPermissions(Prepared(50005, "E", true, Pending("T")), "Restrictive"));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: 4));
+
+        Assert.Empty(run.RunnerErrors);
+        Assert.Equal(new[] { new[] { started, 50001, full, 50002, full, 50003, started, 50004 }, new[] { full, 50005 } },
+            tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
+        Assert.Equal(new[] { new[] { "ResetTestState01", "ResetTestState02", "ResetTestState03", "ResetTestState04" }, new[] { "ResetTestState01" } },
+            tool.Calls.Select(c => c.AllGroups.Where(g => AlToolTestRunner.IsStateResetCodeunit(g.CodeunitId)).Select(g => Assert.Single(g.TestMethods)).ToArray()));
+        Assert.All(tool.Calls, c => Assert.Empty(FakeAlTool.RepeatedTestCases(c.AllGroups)));
+        Assert.Equal(new[] { 50001, 50002, 50003, 50004, 50005 }, run.Result.Codeunits.Select(c => c.CodeunitId!.Value));
+        Assert.Equal(5, run.Result.Total);
+        Assert.Equal(5, run.Result.Passed);
+
+        var stopped = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        Assert.Empty(new AlToolTestRunner(stopped.Execute).Run(suite, Options(batchSize: 4) with { PermissionsMock = false }).RunnerErrors);
+        Assert.All(stopped.Calls.SelectMany(c => c.AllGroups.Where((_, i) => i % 2 == 0)),
+            g => Assert.Equal(AlToolTestRunner.ResetMockStoppedCodeunitId, g.CodeunitId));
+    }
+
+    [Fact]
+    public void A_full_batch_with_alternating_TestPermissions_selects_every_codeunit_method_pair_once()
+    {
+        var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
+        var suite = Suite(Enumerable.Range(0, AlToolTestRunner.MaxBatchSize)
+            .Select(i => WithTestPermissions(Prepared(60000 + i, $"C{i}", true, Pending("T")), i % 2 == 0 ? "Disabled" : "Restrictive")).ToArray());
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options(batchSize: AlToolTestRunner.MaxBatchSize));
+
+        Assert.Empty(run.RunnerErrors);
+        var resets = Assert.Single(tool.Calls).AllGroups.Where((_, i) => i % 2 == 0).ToList();
+        Assert.Empty(FakeAlTool.RepeatedTestCases(tool.Calls[0].AllGroups));
+        Assert.Equal(Enumerable.Range(1, AlToolTestRunner.MaxBatchSize).Select(AlToolTestRunner.ResetMethodName), resets.Select(g => Assert.Single(g.TestMethods)));
+        Assert.Equal(Enumerable.Range(0, AlToolTestRunner.MaxBatchSize)
+                .Select(i => i % 2 == 0 ? AlToolTestRunner.ResetMockStartedCodeunitId : AlToolTestRunner.ResetFullAccessCodeunitId),
+            resets.Select(g => g.CodeunitId));
+        Assert.Equal(AlToolTestRunner.MaxBatchSize, run.Result.Passed);
+    }
+
+    [Fact]
+    public void A_failed_D365_Full_Access_reset_is_an_infrastructure_error()
+    {
+        const int started = AlToolTestRunner.ResetMockStartedCodeunitId;
+        const int full = AlToolTestRunner.ResetFullAccessCodeunitId;
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
+            (started, "ResetTestState01", "passed", null),
+            (50001, "A", "passed", null),
+            (full, "ResetTestState02", "failed", "Codeunit 130302 failed.\r\nAL Callstack:\r\n\"Set State Test Run\"\r\n"),
+            (50002, "B", "passed", null)), autoResets: false);
+        var suite = Suite(
+            WithTestPermissions(Prepared(50001, "Alpha", true, Pending("A")), "Disabled"),
+            WithTestPermissions(Prepared(50002, "Beta", true, Pending("B")), "Restrictive"));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
+
+        var error = Assert.Single(run.RunnerErrors);
+        Assert.Contains($"the state reset before codeunit 50002 Beta failed (codeunit {full} 'ResetTestState02' failed): Codeunit 130302 failed.", error);
+        Assert.Equal(2, run.Result.Passed);
+    }
+
+    [Fact]
+    public void A_state_reset_from_another_reset_codeunit_than_its_position_uses_does_not_count()
+    {
+        const int started = AlToolTestRunner.ResetMockStartedCodeunitId;
+        const int full = AlToolTestRunner.ResetFullAccessCodeunitId;
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results(
+            (full, "ResetTestState01", "passed", null),
+            (50001, "A", "passed", null),
+            (full, "ResetTestState02", "passed", null),
+            (50002, "B", "passed", null)), autoResets: false);
+        var suite = Suite(
+            WithTestPermissions(Prepared(50001, "Alpha", true, Pending("A")), "Disabled"),
+            WithTestPermissions(Prepared(50002, "Beta", true, Pending("B")), "NonRestrictive"));
+
+        var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
+
+        Assert.Contains($"reported 1 of 2 state reset(s) (codeunit {started} / {full} ResetTestState01..ResetTestState02); codeunit(s) 50001 ran without",
+            Assert.Single(run.RunnerErrors));
+        Assert.Equal(2, run.Result.Passed);
+    }
+
+    [Fact]
+    public void State_reset_warnings_name_codeunits_without_or_with_mixed_TestPermissions()
+    {
+        NavTestService.PlannedCodeunit Planned(int id, string? value, bool mixed = false) =>
+            new() { CodeunitId = id, Name = $"C{id}", Run = true, TestPermissions = value, TestPermissionsMixed = mixed };
+        var codeunits = new[]
+        {
+            Planned(50001, "Restrictive"), Planned(50002, null), Planned(50003, "Disabled", mixed: true),
+            Planned(50004, "NonRestrictive", mixed: true), Planned(50005, ""), Planned(50006, "Disabled"),
+        };
+
+        Assert.Empty(AlToolTestRunner.StateResetWarnings(codeunits, permissionsMock: false));
+        var warnings = AlToolTestRunner.StateResetWarnings(codeunits, permissionsMock: true);
+
+        Assert.Equal(3, warnings.Count);
+        Assert.Contains("reported no TestPermissions for 2 codeunit(s) (50002, 50005)", warnings[0]);
+        Assert.Contains($"without assignments (codeunit {AlToolTestRunner.ResetMockStartedCodeunitId})", warnings[0]);
+        Assert.StartsWith("Codeunit 50003 C50003: its selected test methods have different TestPermissions", warnings[1]);
+        Assert.EndsWith($"(Disabled, codeunit {AlToolTestRunner.ResetMockStartedCodeunitId}).", warnings[1]);
+        Assert.EndsWith($"(NonRestrictive, codeunit {AlToolTestRunner.ResetFullAccessCodeunitId}).", warnings[2]);
+        Assert.Empty(AlToolTestRunner.StateResetWarnings(new[] { Planned(50001, "Restrictive"), Planned(50006, "Disabled") }, permissionsMock: true));
+        Assert.Contains("for 12 codeunit(s) (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...)",
+            Assert.Single(AlToolTestRunner.StateResetWarnings(Enumerable.Range(1, 12).Select(i => Planned(i, null)), permissionsMock: true)));
+    }
+
+    [Fact]
+    public void State_resets_need_one_reset_codeunit_per_group()
+    {
+        var groups = new[] { new AlToolTestRunner.TestGroup(50001, Array.Empty<string>()), new AlToolTestRunner.TestGroup(50002, Array.Empty<string>()) };
+
+        Assert.Equal(new[] { AlToolTestRunner.ResetFullAccessCodeunitId, 50001, AlToolTestRunner.ResetMockStartedCodeunitId, 50002 },
+            AlToolTestRunner.WithStateResets(groups, new[] { AlToolTestRunner.ResetFullAccessCodeunitId, AlToolTestRunner.ResetMockStartedCodeunitId })
+                .Select(g => g.CodeunitId));
+        Assert.Throws<ArgumentException>(() => AlToolTestRunner.WithStateResets(groups, new[] { AlToolTestRunner.ResetFullAccessCodeunitId }));
+        Assert.Throws<ArgumentException>(() => AlToolTestRunner.WithStateResets(groups, new[] { AlToolTestRunner.ResetFullAccessCodeunitId, 50001 }));
+    }
+
+    [Theory]
     [InlineData(20)]
     [InlineData(AlToolTestRunner.MaxBatchSize)]
     public void A_full_batch_selects_every_codeunit_method_pair_once(int codeunits)
@@ -393,9 +538,10 @@ public class AlToolExecutorTests
     }
 
     [Theory]
-    [InlineData("BcDevEnvResetMockStarted.Codeunit.al", AlToolTestRunner.ResetMockStartedCodeunitId)]
-    [InlineData("BcDevEnvResetMockStopped.Codeunit.al", AlToolTestRunner.ResetMockStoppedCodeunitId)]
-    public void The_state_reset_codeunits_have_one_test_method_per_batch_position(string file, int codeunitId)
+    [InlineData("BcDevEnvResetMockStarted.Codeunit.al", AlToolTestRunner.ResetMockStartedCodeunitId, "TestStateReset.Reset(true);")]
+    [InlineData("BcDevEnvResetMockStopped.Codeunit.al", AlToolTestRunner.ResetMockStoppedCodeunitId, "TestStateReset.Reset(false);")]
+    [InlineData("BcDevEnvResetFullAccess.Codeunit.al", AlToolTestRunner.ResetFullAccessCodeunitId, "TestStateReset.Reset(true, true);")]
+    public void The_state_reset_codeunits_have_one_test_method_per_batch_position(string file, int codeunitId, string reset)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", file))) dir = dir.Parent;
@@ -407,6 +553,7 @@ public class AlToolExecutorTests
         var methods = Regex.Matches(source, @"\[Test\]\s+procedure (\w+)\(\)").Select(m => m.Groups[1].Value).ToList();
         Assert.Equal(Enumerable.Range(1, AlToolTestRunner.ResetMethodCount).Select(AlToolTestRunner.ResetMethodName), methods);
         Assert.Equal(AlToolTestRunner.ResetMethodCount, Regex.Matches(source, @"procedure \w+\(\)").Count(m => m.Value.Contains(AlToolTestRunner.ResetMethodPrefix)));
+        Assert.Contains(reset, source);
     }
 
     [Fact]
@@ -425,6 +572,7 @@ public class AlToolExecutorTests
         var tool = new FakeAlTool((_, groups) => FakeAlTool.Results(groups.Select(g => (g.CodeunitId, "T", "passed", (string?)null)).ToArray()));
         var suite = Suite(
             Prepared(AlToolTestRunner.ResetMockStoppedCodeunitId, "BcDevEnv Reset Mock Stopped", true, Pending(AlToolTestRunner.ResetMethodName(1))),
+            WithTestPermissions(Prepared(AlToolTestRunner.ResetFullAccessCodeunitId, "BcDevEnv Reset Full Access", true, Pending(AlToolTestRunner.ResetMethodName(1))), "Restrictive"),
             Prepared(50001, "Alpha", true, Pending("T")));
 
         var run = new AlToolTestRunner(tool.Execute).Run(suite, Options());
@@ -737,6 +885,29 @@ public class AlToolExecutorTests
 
         Assert.Equal(new[] { AlToolTestRunner.ResetMockStoppedCodeunitId, AlToolTestRunner.ResetMockStartedCodeunitId },
             tool.Calls.Select(c => c.AllGroups[0].CodeunitId));
+    }
+
+    [Fact]
+    public void Command_with_altool_executor_selects_the_state_reset_by_the_prepared_TestPermissions()
+    {
+        using var dir = new TempDir();
+        var alTool = dir.Write("altool.dll", "");
+        var plan = JsonNode.Parse(FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0)))!;
+        plan["codeunits"]![0]!["testPermissions"] = "Restrictive";
+        plan["codeunits"]![0]!["testPermissionsMixed"] = false;
+        var template = FakeRunnerHandler.XUnit(50001, "Alpha Tests", Pending("A"));
+        var tool = new FakeAlTool((_, _) => FakeAlTool.Results((50001, "A", "passed", null)));
+        var output = Path.Combine(dir.Path, "on.xml");
+
+        Assert.Equal(0, RunCommand(WithPrepare(plan.ToJsonString(), template), tool, "--executor", "altool", "--altool", alTool, "--result-file", output));
+        Assert.Equal(0, RunCommand(WithPrepare(plan.ToJsonString(), template), tool, "--executor", "altool", "--altool", alTool,
+            "--permissions-mock", "off", "--result-file", Path.Combine(dir.Path, "off.xml")));
+
+        Assert.Equal(new[] { new[] { AlToolTestRunner.ResetFullAccessCodeunitId, 50001 }, new[] { AlToolTestRunner.ResetMockStoppedCodeunitId, 50001 } },
+            tool.Calls.Select(c => c.AllGroups.Select(g => g.CodeunitId).ToArray()));
+        var junit = XDocument.Load(output);
+        Assert.Single(junit.Descendants("testcase"));
+        Assert.DoesNotContain("ResetTestState", junit.ToString());
     }
 
     [Fact]

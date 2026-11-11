@@ -123,6 +123,20 @@ public class PerCodeunitProtocolTests
     }
 
     [Fact]
+    public void ParsePlan_reads_the_TestPermissions_of_each_codeunit()
+    {
+        var plan = NavTestService.ParsePlan("""
+            {"testSuite":"DEFAULT","testRunnerId":130450,"functions":3,"disabledFunctions":0,"codeunits":[
+              {"lineNo":10000,"codeunitId":50001,"name":"A","run":true,"functions":1,"disabledFunctions":0,"testPermissions":"NonRestrictive","testPermissionsMixed":true},
+              {"lineNo":20000,"codeunitId":50002,"name":"B","run":true,"functions":1,"disabledFunctions":0,"testPermissions":"Disabled","testPermissionsMixed":false},
+              {"lineNo":30000,"codeunitId":50003,"name":"C","run":true,"functions":1,"disabledFunctions":0}]}
+            """);
+
+        Assert.Equal(new (string?, bool)[] { ("NonRestrictive", true), ("Disabled", false), (null, false) },
+            plan.Codeunits.Select(c => (c.TestPermissions, c.TestPermissionsMixed)));
+    }
+
+    [Fact]
     public void Runs_enabled_codeunits_and_only_reads_results_of_fully_disabled_ones()
     {
         var handler = new FakeRunnerHandler((action, body) => (action, body.GetProperty("codeunitLineNo").GetString()) switch

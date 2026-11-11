@@ -69,6 +69,15 @@ public sealed class NavTestService
         public bool Run { get; init; }
         public int Functions { get; init; }
         public int DisabledFunctions { get; init; }
+
+        /// <summary>
+        /// TestPermissions (Disabled, Restrictive, NonRestrictive) of the codeunit's first selected method, as the
+        /// Test Runner receives it; null when the BcDevEnv Test Runner app does not report it (older versions).
+        /// </summary>
+        public string? TestPermissions { get; init; }
+
+        /// <summary>The selected methods have different TestPermissions (<see cref="TestPermissions"/> is the first one's).</summary>
+        public bool TestPermissionsMixed { get; init; }
     }
 
     /// <summary>The suite PrepareTests built (disabled tests already applied).</summary>

@@ -136,8 +136,11 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
   --permissions-mock <on|off>  Before every test codeunit a BcDevEnv Test Runner codeunit
                             resets the session (ClearLastError, ApplicationArea(''), the first
                             work date, codeunits 130301/132553 when present). on (default):
-                            the permissions mock is then started without assignments; off:
-                            it is stopped. A failed reset is an infrastructure error.
+                            the permissions mock is then started: without assignments for
+                            codeunits whose TestPermissions is Disabled, otherwise with the
+                            D365 Full Access base of codeunit 130302 (when present), as the
+                            Test Runner does per method; off: it is stopped. A failed reset
+                            is an infrastructure error.
   --state-probe <on|off>    Diagnostic, off by default. on: the BcDevEnv State Probe codeunit
                             runs once per batch, after the first reset; it always fails and
                             its message (ApplicationArea, session, Application Area Setup,

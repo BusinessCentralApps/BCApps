@@ -249,7 +249,10 @@ public static class RunTestsCommand
         throw new BcDevEnvException($"Invalid --state-probe '{value}'. Use on or off.");
     }
 
-    /// <summary>--permissions-mock: on (default; started without assignments before every codeunit) or off (stopped).</summary>
+    /// <summary>
+    /// --permissions-mock: on (default; started before every codeunit, with the D365 Full Access base unless its
+    /// TestPermissions is Disabled) or off (stopped).
+    /// </summary>
     public static bool ParsePermissionsMock(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return true;

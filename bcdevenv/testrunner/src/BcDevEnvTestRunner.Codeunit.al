@@ -63,7 +63,8 @@ codeunit 50100 "BcDevEnv Test Runner"
     end;
 
     /// <summary>
-    /// (Re)builds a test suite without running anything and returns a JSON description of its codeunits.
+    /// (Re)builds a test suite without running anything and returns a JSON description of its codeunits
+    /// (including the TestPermissions of each codeunit's first selected method).
     /// Disabled tests are applied here, so they are excluded before execution.
     /// </summary>
     /// <param name="testSuite">Suite code to (re)build; blank = DEFAULT.</param>
@@ -77,6 +78,7 @@ codeunit 50100 "BcDevEnv Test Runner"
     var
         ALTestSuite: Record "AL Test Suite";
         TestSuiteMgt: Codeunit "Test Suite Mgt.";
+        TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture";
         DisabledMethods: Dictionary of [Text, List of [Text]];
         SuiteName: Code[10];
         TestTypeValue: Integer;
@@ -93,6 +95,9 @@ codeunit 50100 "BcDevEnv Test Runner"
         if RunnerId > 0 then
             TestSuiteMgt.ChangeTestRunner(ALTestSuite, RunnerId);
 
+        // Every selection path discovers the methods through "Test Runner - Get Methods", which reports
+        // their TestPermissions.
+        BindSubscription(TestPermissionsCapture);
         if TestTypeValue > 0 then
             SelectByCategorization(ALTestSuite, extensionId, testCodeunitFilter, TestTypeValue, IsolationValue)
         else
@@ -100,13 +105,14 @@ codeunit 50100 "BcDevEnv Test Runner"
                 TestSuiteMgt.SelectTestMethodsByExtension(ALTestSuite, extensionId)
             else
                 TestSuiteMgt.SelectTestMethodsByRange(ALTestSuite, testCodeunitFilter);
+        UnbindSubscription(TestPermissionsCapture);
 
         ExcludeStateResetCodeunits(SuiteName);
         ApplyDisabledTests(SuiteName, DisabledMethods);
         Commit();
 
         ALTestSuite.Get(SuiteName);
-        exit(BuildSuiteJson(ALTestSuite));
+        exit(BuildSuiteJson(ALTestSuite, TestPermissionsCapture));
     end;
 
     /// <summary>
@@ -218,8 +224,8 @@ codeunit 50100 "BcDevEnv Test Runner"
         TestMethodLine: Record "Test Method Line";
     begin
         TestMethodLine.SetRange("Test Suite", SuiteName);
-        TestMethodLine.SetFilter("Test Codeunit", '%1|%2|%3', Codeunit::"BcDevEnv Reset Mock Started", Codeunit::"BcDevEnv Reset Mock Stopped",
-            Codeunit::"BcDevEnv State Probe");
+        TestMethodLine.SetFilter("Test Codeunit", '%1|%2|%3|%4', Codeunit::"BcDevEnv Reset Mock Started", Codeunit::"BcDevEnv Reset Mock Stopped",
+            Codeunit::"BcDevEnv Reset Full Access", Codeunit::"BcDevEnv State Probe");
         TestMethodLine.DeleteAll();
     end;
 
@@ -362,7 +368,7 @@ codeunit 50100 "BcDevEnv Test Runner"
         exit(PatternPos > StrLen(Pattern));
     end;
 
-    local procedure BuildSuiteJson(var ALTestSuite: Record "AL Test Suite"): Text
+    local procedure BuildSuiteJson(var ALTestSuite: Record "AL Test Suite"; var TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture"): Text
     var
         CodeunitLine: Record "Test Method Line";
         FunctionLine: Record "Test Method Line";
@@ -394,6 +400,7 @@ codeunit 50100 "BcDevEnv Test Runner"
                 CodeunitJson.Add('run', CodeunitLine.Run);
                 CodeunitJson.Add('functions', FunctionCount);
                 CodeunitJson.Add('disabledFunctions', DisabledCount);
+                AddTestPermissions(CodeunitJson, ALTestSuite.Name, CodeunitLine."Test Codeunit", TestPermissionsCapture);
                 Codeunits.Add(CodeunitJson);
 
                 TotalFunctions += FunctionCount;
@@ -407,6 +414,39 @@ codeunit 50100 "BcDevEnv Test Runner"
         SuiteJson.Add('codeunits', Codeunits);
         SuiteJson.WriteTo(ResultText);
         exit(ResultText);
+    end;
+
+    // testPermissions: the TestPermissions of the codeunit's first selected method (of its first method when none
+    // is selected), the value the altool executor chooses the codeunit's state reset by; testPermissionsMixed: the
+    // selected methods differ. Both are left out when nothing was recorded.
+    local procedure AddTestPermissions(var CodeunitJson: JsonObject; SuiteName: Code[10]; CodeunitId: Integer; var TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture")
+    var
+        FunctionLine: Record "Test Method Line";
+        Value: Text;
+        FirstValue: Text;
+        Found: Boolean;
+        Mixed: Boolean;
+    begin
+        FunctionLine.SetRange("Test Suite", SuiteName);
+        FunctionLine.SetRange("Test Codeunit", CodeunitId);
+        FunctionLine.SetRange("Line Type", FunctionLine."Line Type"::Function);
+        FunctionLine.SetRange(Run, true);
+        if FunctionLine.IsEmpty() then
+            FunctionLine.SetRange(Run);
+        if FunctionLine.FindSet() then
+            repeat
+                if TestPermissionsCapture.GetTestPermissions(CodeunitId, FunctionLine."Function", Value) then begin
+                    if not Found then
+                        FirstValue := Value;
+                    Mixed := Mixed or (Found and (Value <> FirstValue));
+                    Found := true;
+                end;
+            until FunctionLine.Next() = 0;
+
+        if not Found then
+            exit;
+        CodeunitJson.Add('testPermissions', FirstValue);
+        CodeunitJson.Add('testPermissionsMixed', Mixed);
     end;
 
     local procedure GetCodeunitLine(SuiteName: Code[10]; LineNo: Integer; var CodeunitLine: Record "Test Method Line")

@@ -24,9 +24,12 @@ namespace BcDevEnv.Cli.Testing;
 /// infrastructure error; failed tests alone are not (the AL tool exits 1 for them).</para>
 ///
 /// <para>The server's development test runner raises none of the Test Runner's per-test events, so a
-/// state reset codeunit of the BcDevEnv Test Runner app (<see cref="ResetMockStartedCodeunitId"/> or
-/// <see cref="ResetMockStoppedCodeunitId"/>) is run before every test codeunit of every batch. Its
-/// results are not test results; a reset that fails or is not reported is an infrastructure error.</para>
+/// state reset codeunit of the BcDevEnv Test Runner app is run before every test codeunit of every batch:
+/// <see cref="ResetMockStoppedCodeunitId"/> without the permissions mock; with it,
+/// <see cref="ResetMockStartedCodeunitId"/> for codeunits whose TestPermissions is Disabled (or unknown) and
+/// <see cref="ResetFullAccessCodeunitId"/> (the D365 Full Access base of codeunit 130302, as the Test Runner
+/// sets it for such methods) for all others. Its results are not test results; a reset that fails or is not
+/// reported is an infrastructure error.</para>
 ///
 /// <para>Diagnostic only: with <see cref="Options.StateProbe"/>, the state probe codeunit
 /// (<see cref="StateProbeCodeunitId"/>) runs once per batch, right after the first state reset. It always
@@ -70,8 +73,10 @@ public sealed class AlToolTestRunner
         public string? WorkDirectory { get; init; }
 
         /// <summary>
-        /// The state reset before every test codeunit starts the permissions mock without assignments
-        /// (true, <see cref="ResetMockStartedCodeunitId"/>) or stops it (false, <see cref="ResetMockStoppedCodeunitId"/>).
+        /// The state reset before every test codeunit starts the permissions mock (true): without assignments for
+        /// codeunits whose TestPermissions is Disabled (<see cref="ResetMockStartedCodeunitId"/>), with the D365 Full
+        /// Access base for all others (<see cref="ResetFullAccessCodeunitId"/>); or it stops it (false,
+        /// <see cref="ResetMockStoppedCodeunitId"/>).
         /// </summary>
         public bool PermissionsMock { get; init; } = true;
 
@@ -98,9 +103,16 @@ public sealed class AlToolTestRunner
     public const int ResetMockStoppedCodeunitId = 50104;
 
     /// <summary>
+    /// BcDevEnv Test Runner codeunit "BcDevEnv Reset Full Access" (state reset, permissions mock started with the
+    /// D365 Full Access base of codeunit 130302 "Set State Test Run"), for codeunits whose TestPermissions is not Disabled.
+    /// </summary>
+    public const int ResetFullAccessCodeunitId = 50106;
+
+    /// <summary>
     /// The state reset codeunits have the identical test methods ResetTestState01..ResetTestState50: the server
     /// rejects a test method that occurs twice in one runtests call ("Test case name ... is not unique"), so the
-    /// n-th reset of a batch runs method n. This count is therefore also the maximum batch size.
+    /// n-th reset of a batch runs method n (of whichever reset codeunit it uses). This count is therefore also the
+    /// maximum batch size.
     /// </summary>
     public const int ResetMethodCount = 50;
 
@@ -144,13 +156,12 @@ public sealed class AlToolTestRunner
     {
         var errors = new List<string>(suite.RunnerErrors);
         var probes = new List<string>();
-        var resetId = StateResetCodeunitId(options.PermissionsMock);
         foreach (var reset in suite.Codeunits.Where(c => IsStateResetCodeunit(c.Codeunit.CodeunitId)))
             Log.Warn($"Codeunit {reset.Codeunit.CodeunitId} {reset.Codeunit.Name} is a BcDevEnv state reset codeunit, not a test; it is left out.");
         foreach (var probe in suite.Codeunits.Where(c => IsStateProbeCodeunit(c.Codeunit.CodeunitId)))
             Log.Warn($"Codeunit {probe.Codeunit.CodeunitId} {probe.Codeunit.Name} is the BcDevEnv state probe, not a test; it is left out.");
         var states = suite.Codeunits.Where(c => !IsStateResetCodeunit(c.Codeunit.CodeunitId) && !IsStateProbeCodeunit(c.Codeunit.CodeunitId))
-                                    .Select(c => new CodeunitState(c)).ToList();
+                                    .Select(c => new CodeunitState(c, options.PermissionsMock)).ToList();
         var runnable = states.Where(s => s.Prepared.TemplateAvailable && s.Prepared.Codeunit.Run && s.Group != null).ToList();
         var batchSize = Math.Clamp(options.BatchSize, 1, MaxBatchSize);
         var batches = runnable.Select((s, i) => (s, i)).GroupBy(x => x.i / batchSize, x => x.s).Select(g => g.ToList()).ToList();
@@ -158,8 +169,7 @@ public sealed class AlToolTestRunner
 
         Log.Info($"AL tool: {runnable.Count} codeunit(s) to run in {batches.Count} batch(es) of up to {batchSize} " +
                  $"(timeout {options.Timeout.TotalMinutes:0} min); {states.Count - runnable.Count} codeunit(s) not run (fully disabled or not prepared).");
-        Log.Info($"AL tool: state reset codeunit {resetId} runs before every test codeunit " +
-                 $"(permissions mock {(options.PermissionsMock ? "started without assignments" : "stopped")}); its results are not reported.");
+        LogStateResetPlan(runnable, options);
         if (options.StateProbe)
             Log.Info($"AL tool: diagnostic state probe codeunit {StateProbeCodeunitId} runs after the first state reset of every batch; " +
                      $"its message is logged as \"{StateProbeLogPrefix.TrimEnd()} ...\" and is not a test result.");
@@ -212,15 +222,71 @@ public sealed class AlToolTestRunner
         codeunits.Where(c => c.TemplateAvailable && c.Codeunit.Run)
                  .Select(BuildTestGroup).OfType<TestGroup>().ToList();
 
+    // The state reset plan of the run, and warnings for codeunits whose permission base is uncertain.
+    private static void LogStateResetPlan(IReadOnlyList<CodeunitState> runnable, Options options)
+    {
+        if (!options.PermissionsMock)
+        {
+            Log.Info($"AL tool: state reset codeunit {ResetMockStoppedCodeunitId} runs before every test codeunit " +
+                     "(permissions mock stopped); its results are not reported.");
+            return;
+        }
+
+        var fullAccess = runnable.Count(s => s.ResetCodeunitId == ResetFullAccessCodeunitId);
+        Log.Info($"AL tool: state reset codeunit {ResetMockStartedCodeunitId} (TestPermissions Disabled) or {ResetFullAccessCodeunitId} " +
+                 "(otherwise) runs before every test codeunit (permissions mock started; " +
+                 $"{fullAccess} codeunit(s) with the D365 Full Access base, {runnable.Count - fullAccess} without assignments); " +
+                 "its results are not reported.");
+        foreach (var warning in StateResetWarnings(runnable.Select(s => s.Prepared.Codeunit), options.PermissionsMock))
+            Log.Warn(warning);
+    }
+
+    /// <summary>
+    /// Warnings for codeunits whose state reset may not match the Test Runner's: no TestPermissions reported (an older
+    /// BcDevEnv Test Runner app; the reset starts the permissions mock without assignments) or selected methods with
+    /// different values (the reset runs once per codeunit and uses the first selected method's). None without the
+    /// permissions mock, which never assigns the D365 Full Access base.
+    /// </summary>
+    public static IReadOnlyList<string> StateResetWarnings(IEnumerable<NavTestService.PlannedCodeunit> codeunits, bool permissionsMock)
+    {
+        var warnings = new List<string>();
+        if (!permissionsMock) return warnings;
+        var list = codeunits.ToList();
+        var unknown = list.Where(c => string.IsNullOrWhiteSpace(c.TestPermissions)).ToList();
+        if (unknown.Count > 0)
+            warnings.Add($"AL tool: the BcDevEnv Test Runner reported no TestPermissions for {unknown.Count} codeunit(s) " +
+                         $"({string.Join(", ", unknown.Take(10).Select(c => c.CodeunitId))}{(unknown.Count > 10 ? ", ..." : "")}); " +
+                         $"their state reset starts the permissions mock without assignments (codeunit {ResetMockStartedCodeunitId}), " +
+                         "not with the D365 Full Access base. Is the current BcDevEnv Test Runner app installed?");
+        foreach (var mixed in list.Where(c => c.TestPermissionsMixed && !string.IsNullOrWhiteSpace(c.TestPermissions)))
+            warnings.Add($"Codeunit {mixed.CodeunitId} {mixed.Name}: its selected test methods have different TestPermissions; " +
+                         "the state reset runs once per codeunit and uses the first selected method's " +
+                         $"({mixed.TestPermissions}, codeunit {StateResetCodeunitId(true, mixed.TestPermissions)}).");
+        return warnings;
+    }
+
     /// <summary>Serialises test groups as the AL tool's <c>--testgroups</c> JSON.</summary>
     public static string SerializeTestGroups(IEnumerable<TestGroup> groups) => JsonSerializer.Serialize(groups, GroupJson);
 
-    /// <summary>The state reset codeunit for the permissions mock setting.</summary>
-    public static int StateResetCodeunitId(bool permissionsMock) =>
-        permissionsMock ? ResetMockStartedCodeunitId : ResetMockStoppedCodeunitId;
+    /// <summary>The state reset codeunit for the permissions mock setting (TestPermissions unknown).</summary>
+    public static int StateResetCodeunitId(bool permissionsMock) => StateResetCodeunitId(permissionsMock, null);
+
+    /// <summary>
+    /// The state reset codeunit for a test codeunit: without the permissions mock <see cref="ResetMockStoppedCodeunitId"/>;
+    /// with it, like the Test Runner's codeunit 130453 (130302 for every method whose TestPermissions is not Disabled),
+    /// <see cref="ResetMockStartedCodeunitId"/> for Disabled (and for an unknown value: no D365 Full Access base, as
+    /// before it was reported) and <see cref="ResetFullAccessCodeunitId"/> for any other value.
+    /// </summary>
+    public static int StateResetCodeunitId(bool permissionsMock, string? testPermissions)
+    {
+        if (!permissionsMock) return ResetMockStoppedCodeunitId;
+        if (string.IsNullOrWhiteSpace(testPermissions) || string.Equals(testPermissions.Trim(), "Disabled", StringComparison.OrdinalIgnoreCase))
+            return ResetMockStartedCodeunitId;
+        return ResetFullAccessCodeunitId;
+    }
 
     public static bool IsStateResetCodeunit(int codeunitId) =>
-        codeunitId is ResetMockStartedCodeunitId or ResetMockStoppedCodeunitId;
+        codeunitId is ResetMockStartedCodeunitId or ResetMockStoppedCodeunitId or ResetFullAccessCodeunitId;
 
     public static bool IsStateProbeCodeunit(int codeunitId) => codeunitId == StateProbeCodeunitId;
 
@@ -252,15 +318,30 @@ public sealed class AlToolTestRunner
     public static IReadOnlyList<TestGroup> WithStateResets(IEnumerable<TestGroup> groups, int resetCodeunitId, bool stateProbe = false)
     {
         var list = groups.ToList();
-        if (list.Count > ResetMethodCount)
-            throw new ArgumentException($"A batch has at most {ResetMethodCount} codeunits (one state reset method each); got {list.Count}.", nameof(groups));
-        var result = new List<TestGroup>(list.Count * 2 + 1);
-        for (var i = 0; i < list.Count; i++)
+        return WithStateResets(list, Enumerable.Repeat(resetCodeunitId, list.Count).ToList(), stateProbe);
+    }
+
+    /// <summary>
+    /// As <see cref="WithStateResets(IEnumerable{TestGroup}, int, bool)"/>, with the reset codeunit of each group
+    /// (<paramref name="resetCodeunitIds"/>[i] before <paramref name="groups"/>[i]). The method positions run across
+    /// the reset codeunits ([50103 ResetTestState01, g1, 50106 ResetTestState02, g2, ...]), so no method name repeats.
+    /// </summary>
+    public static IReadOnlyList<TestGroup> WithStateResets(IReadOnlyList<TestGroup> groups, IReadOnlyList<int> resetCodeunitIds, bool stateProbe = false)
+    {
+        if (groups.Count > ResetMethodCount)
+            throw new ArgumentException($"A batch has at most {ResetMethodCount} codeunits (one state reset method each); got {groups.Count}.", nameof(groups));
+        if (resetCodeunitIds.Count != groups.Count)
+            throw new ArgumentException($"One state reset codeunit per group is required; got {resetCodeunitIds.Count} for {groups.Count} group(s).", nameof(resetCodeunitIds));
+        var invalid = resetCodeunitIds.Where(id => !IsStateResetCodeunit(id)).Distinct().ToList();
+        if (invalid.Count > 0)
+            throw new ArgumentException($"Not a state reset codeunit: {string.Join(", ", invalid)}.", nameof(resetCodeunitIds));
+        var result = new List<TestGroup>(groups.Count * 2 + 1);
+        for (var i = 0; i < groups.Count; i++)
         {
-            result.Add(new TestGroup(resetCodeunitId, new[] { ResetMethodName(i + 1) }));
+            result.Add(new TestGroup(resetCodeunitIds[i], new[] { ResetMethodName(i + 1) }));
             if (i == 0 && stateProbe)
                 result.Add(new TestGroup(StateProbeCodeunitId, new[] { StateProbeMethodName }));
-            result.Add(list[i]);
+            result.Add(groups[i]);
         }
         return result;
     }
@@ -283,8 +364,8 @@ public sealed class AlToolTestRunner
 
     private void RunBatch(List<CodeunitState> batch, Options options, TimeSpan timeout, string groupsFile, string label, List<string> errors, List<string> probes)
     {
-        var resetId = StateResetCodeunitId(options.PermissionsMock);
-        File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!), resetId, options.StateProbe)));
+        var resetIds = batch.Select(s => s.ResetCodeunitId).ToList();
+        File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!).ToList(), resetIds, options.StateProbe)));
         var (fileName, arguments) = BuildCommand(options, groupsFile);
         Dictionary<string, string>? environment = null;
         if (string.Equals(options.Authentication, "UserPassword", StringComparison.OrdinalIgnoreCase))
@@ -366,10 +447,11 @@ public sealed class AlToolTestRunner
                 if (IsStateResetCodeunit(codeunitId))
                 {
                     // ResetTestState<n> runs before the n-th codeunit of the batch; it is not a test result. Other
-                    // results of the reset codeunit (OnRun) precede the next reset method.
+                    // results of the reset codeunit (OnRun) precede the next reset method. A reset counts only from
+                    // the reset codeunit chosen for that position.
                     var position = ResetMethodPosition(methodName);
                     if (position > batch.Count) position = 0;
-                    if (position > 0) resets.Add(position);
+                    if (position > 0 && codeunitId == resetIds[position - 1]) resets.Add(position);
                     var next = batch[Math.Min(position > 0 ? position : resets.Count + 1, batch.Count) - 1].Prepared.Codeunit;
                     var status = GetString(item, "status");
                     if (!string.Equals(status?.Trim(), "passed", StringComparison.OrdinalIgnoreCase))
@@ -416,7 +498,8 @@ public sealed class AlToolTestRunner
             if (withoutReset.Count > 0)
             {
                 var methods = batch.Count == 1 ? ResetMethodName(1) : $"{ResetMethodName(1)}..{ResetMethodName(batch.Count)}";
-                var error = $"{label}: the AL tool reported {resets.Count} of {batch.Count} state reset(s) (codeunit {resetId} {methods}); " +
+                var error = $"{label}: the AL tool reported {resets.Count} of {batch.Count} state reset(s) " +
+                            $"(codeunit {string.Join(" / ", resetIds.Distinct())} {methods}); " +
                             $"codeunit(s) {string.Join(", ", withoutReset)} ran without a clean state. Is the current BcDevEnv Test Runner app installed?";
                 Log.Error(error);
                 errors.Add(error);
@@ -516,16 +599,20 @@ public sealed class AlToolTestRunner
     // The template of one prepared codeunit and the outcomes merged into it.
     private sealed class CodeunitState
     {
-        public CodeunitState(NavTestService.PreparedCodeunit prepared)
+        public CodeunitState(NavTestService.PreparedCodeunit prepared, bool permissionsMock)
         {
             Prepared = prepared;
             Result = prepared.Template;
             Group = prepared.TemplateAvailable && prepared.Codeunit.Run ? BuildTestGroup(prepared) : null;
+            ResetCodeunitId = StateResetCodeunitId(permissionsMock, prepared.Codeunit.TestPermissions);
         }
 
         public NavTestService.PreparedCodeunit Prepared { get; }
         public TestRunResult Result { get; }
         public TestGroup? Group { get; }
+
+        /// <summary>The state reset codeunit that runs before this codeunit.</summary>
+        public int ResetCodeunitId { get; }
         private readonly HashSet<TestMethodResult> _reported = new();
         private string? _onRunFailure;
 
