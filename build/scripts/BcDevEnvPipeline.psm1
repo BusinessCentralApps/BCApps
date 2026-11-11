@@ -44,6 +44,11 @@ $script:DefaultAppTestTimeoutMinutes = 240
 # BcDevEnv Test Runner is compiled against it so its state reset can start and stop the mock.
 $script:PermissionsMockAppId = '40860557-a18d-42ad-aecb-22b7dd80dc80'
 $script:PermissionsMockSymbol = 'BCDEVENV_PERMISSIONSMOCK'
+# Application Test Library (src/Layers/W1/Tests/ApplicationTestLibrary). When it is installed together with
+# Permissions Mock, the runner is also compiled against it, so it can restart a stopped permissions mock on
+# "Library - Test Initialize".OnTestInitialize.
+$script:ApplicationTestLibraryAppId = 'd852d5d2-a39d-4179-baeb-f99a19e32510'
+$script:ApplicationTestLibrarySymbol = 'BCDEVENV_APPTESTLIB'
 # Source of t2embed.dll (font embedding, needed to render reports as PDF), which Windows Server Core
 # lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
 # $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
@@ -1602,26 +1607,66 @@ function Set-BcDevEnvRunnerPermissionsMock {
     $mockApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:PermissionsMockAppId }) | Select-Object -First 1
     if ($null -eq $mockApp) { return $null }
 
+    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $mockApp -Symbol $script:PermissionsMockSymbol
+    return $mockApp
+}
+
+<#
+.SYNOPSIS
+    When both Application Test Library and Permissions Mock are in the install set (-Apps, Get-BcDevEnvAppInfo
+    objects), makes a copy of the BcDevEnv Test Runner's app.json compile against Application Test Library: adds
+    the dependency and the preprocessor symbol BCDEVENV_APPTESTLIB, which (with BCDEVENV_PERMISSIONSMOCK, see
+    Set-BcDevEnvRunnerPermissionsMock) compiles the runner's restart of a stopped permissions mock on
+    "Library - Test Initialize".OnTestInitialize. Returns the Application Test Library app, or $null (app.json
+    unchanged) when either app is not installed. Idempotent.
+#>
+function Set-BcDevEnvRunnerApplicationTestLibrary {
+    param(
+        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [AllowEmptyCollection()] [object[]] $Apps = @()
+    )
+
+    $libraryApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:ApplicationTestLibraryAppId }) | Select-Object -First 1
+    if ($null -eq $libraryApp) { return $null }
+    $mockApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:PermissionsMockAppId }) | Select-Object -First 1
+    if ($null -eq $mockApp) { return $null }
+
+    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $libraryApp -Symbol $script:ApplicationTestLibrarySymbol
+    return $libraryApp
+}
+
+<#
+.SYNOPSIS
+    Adds a dependency on -App (a Get-BcDevEnvAppInfo object; replaces an existing one with the same id) and the
+    preprocessor symbol -Symbol (once) to the app.json at -AppJsonPath, keeping the other entries.
+#>
+function Add-BcDevEnvRunnerAppDependency {
+    param(
+        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [Parameter(Mandatory = $true)] [object] $App,
+        [Parameter(Mandatory = $true)] [string] $Symbol
+    )
+
+    $appId = [string]$App.Id
     $json = Get-Content -LiteralPath $AppJsonPath -Raw | ConvertFrom-Json
     $dependencies = @()
     if ($json.PSObject.Properties['dependencies'] -and $null -ne $json.dependencies) {
-        $dependencies = @($json.dependencies | Where-Object { [string]$_.id -ne $script:PermissionsMockAppId })
+        $dependencies = @($json.dependencies | Where-Object { [string]$_.id -ne $appId })
     }
     $dependencies += [pscustomobject]@{
-        id        = $script:PermissionsMockAppId
-        name      = [string]$mockApp.Name
-        publisher = [string]$mockApp.Publisher
-        version   = [string]$mockApp.Version
+        id        = $appId
+        name      = [string]$App.Name
+        publisher = [string]$App.Publisher
+        version   = [string]$App.Version
     }
     $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue $dependencies -Force
 
     $symbols = @()
     if ($json.PSObject.Properties['preprocessorSymbols'] -and $null -ne $json.preprocessorSymbols) { $symbols = @($json.preprocessorSymbols) }
-    if ($symbols -notcontains $script:PermissionsMockSymbol) { $symbols += $script:PermissionsMockSymbol }
+    if ($symbols -notcontains $Symbol) { $symbols += $Symbol }
     $json | Add-Member -NotePropertyName 'preprocessorSymbols' -NotePropertyValue $symbols -Force
 
     Set-Content -LiteralPath $AppJsonPath -Value ($json | ConvertTo-Json -Depth 10) -Encoding UTF8
-    return $mockApp
 }
 
 function Get-BcDevEnvJUnitCounts {

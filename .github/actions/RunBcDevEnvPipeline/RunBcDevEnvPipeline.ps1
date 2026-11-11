@@ -222,6 +222,15 @@ try {
             if ($mockApp) {
                 $runnerRootIds += $mockApp.Id
                 Write-Host "Permissions Mock $($mockApp.Version) is installed: the state reset sets the permissions mock $permissionsMockLabel."
+                # A test method that initializes with the mock stopped gets it restarted only with Application Test Library.
+                $libraryApp = Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath (Join-Path $runnerSource 'app.json') -Apps $apps
+                if ($libraryApp) {
+                    $runnerRootIds += $libraryApp.Id
+                    Write-Host "Application Test Library $($libraryApp.Version) is installed (BCDEVENV_APPTESTLIB): a test method whose Initialize raises Library - Test Initialize's OnTestInitialize with the permissions mock stopped gets it restarted with its codeunit's base."
+                }
+                else {
+                    Write-Host "Application Test Library is not installed: the permissions mock is set per test codeunit only."
+                }
             }
             else {
                 Write-Host "Permissions Mock is not installed: the state reset does not control the permissions mock."

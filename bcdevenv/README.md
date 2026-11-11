@@ -278,6 +278,25 @@ base, with a warning; a codeunit without a value (an older runner app) gets 5010
 base), with a warning. The plan line shows the split: `… (permissions mock started; N
 codeunit(s) with the D365 Full Access base, M without assignments)`.
 
+**Per-method restart of a stopped mock (`altool`).** The Test Runner starts a fresh
+mock before every test method; the reset runs only before the codeunit. A method that
+stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for example in
+`Expense Permissions Test`) therefore left it stopped for the later methods of its
+codeunit, whose `Library - Lower Permissions` calls then did nothing
+(`SetExactPermissionSet` exits when the mock is not started), so they ran as SUPER.
+Each reset now records the base it applied (no assignments, D365 Full Access, or
+stopped) in isolated storage, committed with its restore. Codeunit 50110 subscribes to
+`OnTestInitialize` of codeunit 132250 `Library - Test Initialize`, which test methods
+raise first in their `Initialize()`, and, while a run is active and the mock is
+stopped, restarts it with that base: 130301 for no assignments, 130301 and then 130302
+for the D365 Full Access base, nothing when the reset stopped the mock (`off`). A
+started mock is never touched, so the assignments a test makes before its
+`Initialize()` (`SetOutsideO365Scope`, `SetO365BusFull`) stay. `PrepareTests` and
+`EndTestRun` forget the base, so nothing is restarted outside a run or before its first
+reset. The subscriber is compiled only when `Application Test Library` and
+`Permissions Mock` are both installed (see [Known differences](#bcapps-ci-pipeline));
+the state probe shows the recorded base and whether it is compiled.
+
 The reset codeunits are never selected as tests (`PrepareTests` drops them), and
 their results are not counted, not written to the JUnit report and not matched against
 DisabledTests; the log shows `N result(s) (+M state reset(s))` per batch. A reset that
@@ -514,7 +533,10 @@ carries over from one method to the next:
 - permission set assignments a method makes (`PermissionsMock.Set`,
   `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method
   (and, unless the method's `TestPermissions` is `Disabled`, assigns the D365 Full
-  Access base again), so with the mock on, a later method of the same codeunit may run
+  Access base again). Here only a mock that an earlier method **stopped** is restarted
+  with the codeunit's base, when the next method raises `OnTestInitialize` (see
+  [Running tests](#running-tests)); a mock that is still **started** keeps the
+  assignments, so with the mock on, a later method of the same codeunit may run
   with the permissions an earlier method lowered or assigned instead of the base, and
   tests that passed only because they ran as SUPER may now fail. With the mock off
   (stopped), permission tests run as SUPER and
@@ -539,6 +561,20 @@ app is in the install set (the action adds the dependency and the
 mock part with the action input `testPermissionsMock` or the AL-Go setting
 `bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
 both.
+
+The per-method restart of a stopped mock (codeunit 50110) is compiled only when
+`Application Test Library` is in the install set as well: the action then also adds
+that dependency and the `BCDEVENV_APPTESTLIB` symbol, and logs it, so projects without
+it (System Application, Business Foundation) are unaffected. It covers only methods
+that raise `OnTestInitialize` (in practice through their `Initialize()`), and it runs
+there, not before the method: calls that a method makes on the stopped mock before its
+`Initialize()` (for example `SetOutsideO365Scope`) do nothing, and the mock then starts
+with the base; a method that stops the mock and calls `Initialize()` again gets it
+restarted; and 130301's random seed 1 and notification context reset happen at that
+point, only in methods that found the mock stopped. Its order among other
+`OnTestInitialize` subscribers is not defined. The restarts are not counted: a count
+written in the test's session would be rolled back by its test isolation, and a commit
+there would change the test's transaction.
 
 The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
 `OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are

@@ -778,7 +778,62 @@ public class AlToolExecutorTests
 
         // PrepareTests starts the run, EndTestRun (which the CLI calls) ends it.
         Assert.Contains("LoginAppArea.StartRun();", runner);
-        Assert.Matches($@"procedure {NavTestService.EndTestRunAction}\(\): Text\s+var\s+LoginAppArea: Codeunit ""BcDevEnv Login App Area"";\s+begin\s+if LoginAppArea.EndRun\(\)", runner);
+        Assert.Contains("if LoginAppArea.EndRun() then", AlProcedure(runner, $@"procedure {NavTestService.EndTestRunAction}\(\): Text"));
+    }
+
+    [Fact]
+    public void A_stopped_permissions_mock_is_restarted_on_test_initialize_with_the_recorded_base_while_a_run_is_active()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "testrunner", "src", "BcDevEnvMockRestart.Codeunit.al"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        string Read(string file) => File.ReadAllText(Path.Combine(dir!.FullName, "testrunner", "src", file));
+        var restart = Read("BcDevEnvMockRestart.Codeunit.al");
+        var reset = Read("BcDevEnvTestStateReset.Codeunit.al");
+        var runner = Read("BcDevEnvTestRunner.Codeunit.al");
+        var login = Read("BcDevEnvLoginAppArea.Codeunit.al");
+
+        // Compiled only when both Application Test Library and Permissions Mock are installed: everything but the
+        // header comment is inside both guards.
+        var code = Regex.Replace(restart, @"(?m)^\s*//[^\r\n]*\r?\n", "").Trim();
+        Assert.Matches(@"^#if BCDEVENV_APPTESTLIB\r?\n#if BCDEVENV_PERMISSIONSMOCK\r?\n", code);
+        Assert.Matches(@"\r?\n#endif\r?\n#endif$", code);
+        Assert.Matches(@"codeunit 50110 ""BcDevEnv Mock Restart""", code);
+
+        var subscriber = Regex.Match(code,
+            @"\[EventSubscriber\(ObjectType::Codeunit, Codeunit::""Library - Test Initialize"", OnTestInitialize, '', false, false\)\]\s+" +
+            @"local procedure \w+\(CallerCodeunitID: Integer\)(?<body>.*?)\r?\n    end;", RegexOptions.Singleline);
+        Assert.True(subscriber.Success);
+        var body = subscriber.Groups["body"].Value;
+        var restartCall = body.IndexOf("TestStateReset.RestartStoppedPermissionsMock();", StringComparison.Ordinal);
+        Assert.InRange(body.IndexOf("if PermissionsMock.IsStarted() then", StringComparison.Ordinal), 0, restartCall);
+        Assert.InRange(body.IndexOf("if not LoginAppArea.IsRunActive() then", StringComparison.Ordinal), 0, restartCall);
+        // A started mock keeps the assignments the test made before its Initialize.
+        Assert.DoesNotMatch(@"ClearAssignments|\.Set\(|\.Assign\(|\.Stop\(\)|\.Start\(\)", code);
+        Assert.Matches(@"\r?\n    procedure IsRunActive\(\): Boolean", login);
+
+        // The restart acts only on a stopped mock, with the base that the reset recorded (and committed) for the codeunit.
+        var restartProcedure = AlProcedure(reset, @"procedure RestartStoppedPermissionsMock\(\): Boolean");
+        Assert.Matches(@"^\s+var\s+PermissionsMock: Codeunit ""Permissions Mock"";\s+Base: Text;\s+begin\s+if PermissionsMock\.IsStarted\(\) then\s+exit\(false\);\s+if not IsolatedStorage\.Get\(", restartProcedure);
+        var restartAt = reset.IndexOf("procedure RestartStoppedPermissionsMock", StringComparison.Ordinal);
+        var guardAt = reset.LastIndexOf("#if BCDEVENV_PERMISSIONSMOCK", restartAt, StringComparison.Ordinal);
+        Assert.InRange(guardAt, 0, restartAt);
+        Assert.DoesNotContain("#endif", reset[guardAt..restartAt]);
+        var resetProcedure = AlProcedure(reset, @"procedure Reset\(StartPermissionsMock: Boolean; FullAccessBase: Boolean\)");
+        Assert.InRange(resetProcedure.IndexOf("SetPermissionsMockBase(StartPermissionsMock, FullAccessBase);", StringComparison.Ordinal), 0, resetProcedure.IndexOf("Commit();", StringComparison.Ordinal));
+
+        // No base outside a run: PrepareTests (before its commit) and EndTestRun forget it.
+        var prepare = AlProcedure(runner, @"procedure PrepareTests\([^)]*\): Text");
+        Assert.InRange(prepare.IndexOf("TestStateReset.ClearPermissionsMockBase();", StringComparison.Ordinal), 0, prepare.IndexOf("Commit();", StringComparison.Ordinal));
+        Assert.Contains("TestStateReset.ClearPermissionsMockBase();", AlProcedure(runner, $@"procedure {NavTestService.EndTestRunAction}\(\): Text"));
+    }
+
+    // The body (from the line after the signature to the procedure's "end;") of an AL procedure at the top level of an object.
+    private static string AlProcedure(string source, string signaturePattern)
+    {
+        var match = Regex.Match(source, signaturePattern + @"[^\r\n]*\r?\n(?<body>.*?)\r?\n    end;", RegexOptions.Singleline);
+        Assert.True(match.Success, $"No AL procedure matches '{signaturePattern}'.");
+        return match.Groups["body"].Value;
     }
 
     [Fact]

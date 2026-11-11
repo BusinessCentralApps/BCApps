@@ -95,7 +95,8 @@ codeunit 50109 "BcDevEnv Login App Area"
         exit(StrSubstNo(NotAppliedTxt, IsRunActive(), CountersText));
     end;
 
-    local procedure IsRunActive(): Boolean
+    /// <summary>Whether a test run is active (from PrepareTests until EndTestRun). Also used by codeunit 50110.</summary>
+    procedure IsRunActive(): Boolean
     begin
         exit(IsolatedStorage.Contains(ActiveKeyTok, DataScope::Module));
     end;

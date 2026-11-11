@@ -145,16 +145,19 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
                             the permissions mock is then started: without assignments for
                             codeunits whose TestPermissions is Disabled, otherwise with the
                             D365 Full Access base of codeunit 130302 (when present), as the
-                            Test Runner does per method; off: it is stopped. A failed reset
-                            is an infrastructure error. The restores and the sessions whose
-                            login ApplicationArea was cleared are logged as "State reset: ..."
-                            after the run.
+                            Test Runner does per method; off: it is stopped. When Application
+                            Test Library is installed, a test method whose Initialize raises
+                            Library - Test Initialize's OnTestInitialize while the mock is
+                            stopped gets it restarted with its codeunit's base (a started mock
+                            is left as it is). A failed reset is an infrastructure error. The
+                            restores and the sessions whose login ApplicationArea was cleared
+                            are logged as "State reset: ..." after the run.
   --state-probe <on|off>    Diagnostic, off by default. on: the BcDevEnv State Probe codeunit
                             runs once per batch, after the first reset; it always fails and
                             its message (ApplicationArea and the login hook, session,
                             Application Area Setup and its restores, TestPage control
-                            visibility, permissions mock, work date) is logged as
-                            "State probe: ...". It is not a test result.
+                            visibility, permissions mock and its recorded base, work date) is
+                            logged as "State probe: ...". It is not a test result.
 
   Runner call failures and disabled-test violations fail the command even with --allow-failures.
 """,

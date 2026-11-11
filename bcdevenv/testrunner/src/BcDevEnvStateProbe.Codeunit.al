@@ -1,7 +1,8 @@
 // Diagnostic only: 'bcdevenv run-tests --executor altool --state-probe on' runs ProbeState once per AL tool
 // batch, right after the first state reset and before the first test codeunit. It always fails on purpose:
 // its error message is one line with the state a test codeunit starts with (application area, what the login
-// hook of codeunit 50109 did in this session, session, work date, permissions mock, the "Application Area
+// hook of codeunit 50109 did in this session, session, work date, permissions mock and the base the state reset
+// recorded for it, the "Application Area
 // Setup" rows and the restores of the state reset since
 // PrepareTests) and whether a TestPage finds controls in the Basic and Suite application areas, with the
 // application area it found and after ApplicationArea(''). The CLI logs it as "State probe: ..." and never
@@ -28,12 +29,14 @@ codeunit 50105 "BcDevEnv State Probe"
     var
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
         LoginAppArea: Codeunit "BcDevEnv Login App Area";
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
         Diagnostic: TextBuilder;
     begin
         Diagnostic.Append(StrSubstNo('ApplicationArea=''%1''; SessionId=%2; ClientType=%3; GuiAllowed=%4', ApplicationArea(), SessionId(), CurrentClientType(), GuiAllowed()));
         Diagnostic.Append(StrSubstNo('; login hook: %1', LoginAppArea.GetSessionText()));
         Diagnostic.Append(StrSubstNo('; Company=''%1''; User=''%2''; WorkDate=%3', CompanyName(), UserId(), Format(WorkDate(), 0, 9)));
         Diagnostic.Append(StrSubstNo('; PermissionsMock=%1', PermissionsMockState()));
+        Diagnostic.Append(StrSubstNo('; recorded mock base=''%1''; per-method mock restart: %2', TestStateReset.GetPermissionsMockBaseText(), MockRestartState()));
         Diagnostic.Append(StrSubstNo('; Application Area Setup: %1', ApplicationAreaSetupRows()));
         Diagnostic.Append(StrSubstNo('; Application Area Setup restores: %1', AppAreaSetupReset.GetSummaryText()));
         Diagnostic.Append(StrSubstNo('; TestPage with that area: %1', ProbePage()));
@@ -147,6 +150,20 @@ codeunit 50105 "BcDevEnv State Probe"
         exit('n/a (Permissions Mock not installed)');
     end;
 #endif
+
+    // Whether codeunit 50110 (restart of a stopped permissions mock on Library - Test Initialize's OnTestInitialize) is compiled.
+    local procedure MockRestartState(): Text
+    begin
+#if BCDEVENV_APPTESTLIB
+#if BCDEVENV_PERMISSIONSMOCK
+        exit('compiled');
+#else
+        exit('not compiled (Permissions Mock not installed)');
+#endif
+#else
+        exit('not compiled (Application Test Library not installed)');
+#endif
+    end;
 
     local procedure SingleLine(Value: Text): Text
     var

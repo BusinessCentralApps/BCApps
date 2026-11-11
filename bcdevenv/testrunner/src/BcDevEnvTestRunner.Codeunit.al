@@ -13,7 +13,8 @@
 //                                      codeunit and progress can be reported.
 // PrepareTests also starts a test run for the AL tool executor's state resets (codeunit 50102), which
 // GetStateResetSummary reports on afterwards, and during which every client session that opens a company gets
-// ApplicationArea('') (codeunit 50109) until EndTestRun.
+// ApplicationArea('') (codeunit 50109) and a test method that initializes with the permissions mock stopped gets it
+// restarted (codeunit 50110) until EndTestRun.
 //
 // All action parameters are Text (the type proven to round-trip over OData); numeric values are
 // parsed inside the procedures.
@@ -84,6 +85,7 @@ codeunit 50100 "BcDevEnv Test Runner"
         TestPermissionsCapture: Codeunit "BcDevEnv Test Perm. Capture";
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
         LoginAppArea: Codeunit "BcDevEnv Login App Area";
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
         DisabledMethods: Dictionary of [Text, List of [Text]];
         SuiteName: Code[10];
         TestTypeValue: Integer;
@@ -118,6 +120,8 @@ codeunit 50100 "BcDevEnv Test Runner"
         AppAreaSetupReset.StartRun();
         // From now on until EndTestRun, every client session (the AL tool's test sessions) starts with ApplicationArea('').
         LoginAppArea.StartRun();
+        // No permissions mock base until the first state reset records one (codeunit 50110 restarts nothing before).
+        TestStateReset.ClearPermissionsMockBase();
         Commit();
 
         ALTestSuite.Get(SuiteName);
@@ -189,13 +193,16 @@ codeunit 50100 "BcDevEnv Test Runner"
 
     /// <summary>
     /// Ends the test run that PrepareTests started: client sessions that open a company keep the application area they
-    /// get at login again (codeunit 50109). 'bcdevenv run-tests' calls it when the run finishes, also after a failure,
-    /// with either executor. Returns 'ended', or 'not active' when no run was active.
+    /// get at login again (codeunit 50109), and the permissions mock base that the last state reset recorded is
+    /// forgotten (codeunit 50110 no longer restarts a stopped mock). 'bcdevenv run-tests' calls it when the run
+    /// finishes, also after a failure, with either executor. Returns 'ended', or 'not active' when no run was active.
     /// </summary>
     procedure EndTestRun(): Text
     var
         LoginAppArea: Codeunit "BcDevEnv Login App Area";
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
     begin
+        TestStateReset.ClearPermissionsMockBase();
         if LoginAppArea.EndRun() then
             exit('ended');
         exit('not active');

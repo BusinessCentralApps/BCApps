@@ -638,6 +638,42 @@ Describe "Set-BcDevEnvRunnerPermissionsMock" {
     }
 }
 
+Describe "Set-BcDevEnvRunnerApplicationTestLibrary" {
+    BeforeEach {
+        $appJson = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner/app.json') -Destination $appJson
+        $original = Get-Content -LiteralPath $appJson -Raw
+        $mock = New-ManifestObject -Id '40860557-a18d-42ad-aecb-22b7dd80dc80' -Name 'Permissions Mock' -Version '30.0.1.2'
+        $library = New-ManifestObject -Id 'd852d5d2-a39d-4179-baeb-f99a19e32510' -Name 'Application Test Library' -Version '30.0.3.4'
+        $other = New-ManifestObject -Id '11111111-1111-1111-1111-111111111111' -Name 'Other'
+    }
+
+    It "leaves app.json unchanged without Application Test Library or without Permissions Mock" {
+        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $mock) | Should -BeNullOrEmpty
+        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library) | Should -BeNullOrEmpty
+        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @() | Should -BeNullOrEmpty
+        Get-Content -LiteralPath $appJson -Raw | Should -Be $original
+    }
+
+    It "adds the dependency and the BCDEVENV_APPTESTLIB symbol once, next to the Permissions Mock ones" {
+        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
+        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other, $library, $mock) | Out-Null
+        (Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library, $mock)).Name | Should -Be 'Application Test Library'
+        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($library, $mock) | Out-Null
+        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
+        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_PERMISSIONSMOCK', 'BCDEVENV_APPTESTLIB')
+        $dependencies = @($json.dependencies)
+        $dependencies.Count | Should -Be ($before.Count + 2)
+        foreach ($dependency in $before) { @($dependencies.id) | Should -Contain $dependency.id }
+        @($dependencies | Where-Object { $_.id -eq '40860557-a18d-42ad-aecb-22b7dd80dc80' }).Count | Should -Be 1
+        $added = @($dependencies | Where-Object { $_.id -eq 'd852d5d2-a39d-4179-baeb-f99a19e32510' })
+        $added.Count | Should -Be 1
+        $added[0].name | Should -Be 'Application Test Library'
+        $added[0].publisher | Should -Be 'Microsoft'
+        $added[0].version | Should -Be '30.0.3.4'
+    }
+}
+
 Describe "Merge-BcDevEnvJUnitResults and Get-BcDevEnvTestGateFailures" {
     BeforeAll {
         $first = Join-Path $TestDrive 'first.xml'

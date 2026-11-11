@@ -16,7 +16,10 @@
 //     started), with its assignments: none, or the D365 Full Access base of 130302 (that the base reaches
 //     the next codeunit is not verified yet).
 // 130301 and 132553 still run as before; whether their single-instance state reaches the next codeunit is
-// not verified. The reset works per codeunit, not per test method.
+// not verified. The reset works per codeunit, not per test method. It records the permissions mock base it
+// applied (committed, isolated storage): when a test method of the codeunit initializes and finds the mock
+// stopped (an earlier method stopped it), codeunit 50110 restarts it with that base through
+// RestartStoppedPermissionsMock, as the Test Runner does before every method.
 //
 // Optional objects are run through AllObj checks, as 130453 does, so this app gains no dependencies
 // on test libraries. Only the permissions mock is referenced directly; the pipeline compiles that
@@ -32,6 +35,13 @@ using System.TestLibraries.Security.AccessControl;
 codeunit 50102 "BcDevEnv Test State Reset"
 {
     Access = Public;
+
+    var
+        MockBaseKeyTok: Label 'BcDevEnv.TestRun.PermissionsMockBase', Locked = true;
+        NoAssignmentsBaseTok: Label 'no assignments', Locked = true;
+        FullAccessBaseTok: Label 'D365 Full Access', Locked = true;
+        StoppedBaseTok: Label 'stopped', Locked = true;
+        NoBaseTxt: Label 'none recorded', Locked = true;
 
     /// <summary>
     /// Resets the test state before the next test codeunit.
@@ -56,9 +66,11 @@ codeunit 50102 "BcDevEnv Test State Reset"
         // (also called by 130301 and 130302) replaces the mock without disposing it. The restore below
         // also needs the real permissions.
         StopPermissionsMock();
+        // The base that a test method of the next codeunit restores when it finds the mock stopped (codeunit 50110).
+        SetPermissionsMockBase(StartPermissionsMock, FullAccessBase);
 #endif
         AppAreaSetupReset.Restore();
-        // Keep the restore even when a later step fails.
+        // Keep the restore (and the recorded base) even when a later step fails.
         Commit();
 
         // codeunit 130301 "Reset State Before Test Run": random seed 1, the legacy permission catalog
@@ -76,6 +88,74 @@ codeunit 50102 "BcDevEnv Test State Reset"
         // pipeline does not publish, like the native one). It binds its subscribers in this session.
         RunIfPresent(132553);
     end;
+
+    /// <summary>
+    /// Forgets the permissions mock base that the last state reset recorded (PrepareTests and EndTestRun), so that
+    /// RestartStoppedPermissionsMock does nothing until the next state reset.
+    /// </summary>
+    procedure ClearPermissionsMockBase()
+    begin
+        if IsolatedStorage.Contains(MockBaseKeyTok, DataScope::Module) then
+            IsolatedStorage.Delete(MockBaseKeyTok, DataScope::Module);
+    end;
+
+    /// <summary>The permissions mock base that the last state reset recorded, for the state probe.</summary>
+    procedure GetPermissionsMockBaseText(): Text
+    var
+        Base: Text;
+    begin
+        if IsolatedStorage.Get(MockBaseKeyTok, DataScope::Module, Base) then
+            exit(Base);
+        exit(NoBaseTxt);
+    end;
+
+#if BCDEVENV_PERMISSIONSMOCK
+    /// <summary>
+    /// Restarts a stopped permissions mock with the base that the last state reset applied to the current test
+    /// codeunit, as the Test Runner does before every test method: no assignments (codeunit 130301 "Reset State
+    /// Before Test Run", which also sets the random seed 1 and clears the temporary notification context), or
+    /// the D365 Full Access base (130301, then 130302 "Set State Test Run"). Does nothing when the mock is
+    /// started (its assignments stay as the test set them), when the reset stopped the mock
+    /// (--permissions-mock off), or when no reset recorded a base since PrepareTests.
+    /// </summary>
+    /// <returns>Whether the mock was restarted.</returns>
+    procedure RestartStoppedPermissionsMock(): Boolean
+    var
+        PermissionsMock: Codeunit "Permissions Mock";
+        Base: Text;
+    begin
+        if PermissionsMock.IsStarted() then
+            exit(false);
+        if not IsolatedStorage.Get(MockBaseKeyTok, DataScope::Module, Base) then
+            exit(false);
+        case Base of
+            NoAssignmentsBaseTok:
+                RunIfPresent(130301);
+            FullAccessBaseTok:
+                begin
+                    RunIfPresent(130301);
+                    SetFullAccessBase();
+                end;
+            else
+                exit(false);
+        end;
+        StartPermissionsMockWithoutAssignments();
+        exit(true);
+    end;
+
+    local procedure SetPermissionsMockBase(StartPermissionsMock: Boolean; FullAccessBase: Boolean)
+    var
+        Base: Text;
+    begin
+        Base := StoppedBaseTok;
+        if StartPermissionsMock then
+            if FullAccessBase then
+                Base := FullAccessBaseTok
+            else
+                Base := NoAssignmentsBaseTok;
+        IsolatedStorage.Set(MockBaseKeyTok, Base, DataScope::Module);
+    end;
+#endif
 
     local procedure RunIfPresent(CodeunitId: Integer)
     begin
