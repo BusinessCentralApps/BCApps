@@ -48,6 +48,7 @@ public static class BuildImageCommand
         if (!string.IsNullOrWhiteSpace(license) && !File.Exists(license))
             throw new BcDevEnvException($"License file not found: '{license}'.");
         var appFiles = NavAppService.ResolveAppFiles(a.GetAll("app-file").Concat(ReadAppList(a.Get("app-list"))));
+        var system32Files = ResolveSystem32Files(a.GetAll("system32-file"));
         var licenseWarning = CheckLicense(
             hasLicense: !string.IsNullOrWhiteSpace(license),
             emptyDatabase: manifest != null && a.Get("bak") == null,
@@ -91,6 +92,9 @@ public static class BuildImageCommand
             licenseLeaf = Path.GetFileName(license);
             File.Copy(license, Path.Combine(licDir, licenseLeaf), overwrite: true);
         }
+
+        // 4b. System DLLs the base image may lack (e.g. t2embed.dll); see the Dockerfile.
+        StageSystem32Files(system32Files, context);
 
         // 5. Bake-time apps (.app files only), installed in the order given.
         var appLeaves = new List<string>();
@@ -178,6 +182,42 @@ public static class BuildImageCommand
         return emptyDatabase
             ? "No license baked into the image; the empty create-env database holds none, so apps cannot be published into the container."
             : "No license baked into the image; provisioning relies on a license already stored in the database backup.";
+    }
+
+    /// <summary>Context folder of the --system32-file files; the Dockerfile copies them into C:\Windows\System32.</summary>
+    public const string System32ContextFolder = "system32";
+
+    /// <summary>
+    /// Validates the --system32-file values: existing files with distinct names, because they are
+    /// staged flat and copied into C:\Windows\System32 of the image when the base image lacks them
+    /// (e.g. t2embed.dll, which Windows Server Core does not have and PDF report rendering needs).
+    /// </summary>
+    public static IReadOnlyList<string> ResolveSystem32Files(IEnumerable<string> files)
+    {
+        var resolved = new List<string>();
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files.Where(f => !string.IsNullOrWhiteSpace(f)))
+        {
+            var fullPath = Path.GetFullPath(file);
+            if (!File.Exists(fullPath)) throw new BcDevEnvException($"System32 file not found: '{file}'.");
+            var leaf = Path.GetFileName(fullPath);
+            if (seen.TryGetValue(leaf, out var other))
+                throw new BcDevEnvException($"Two --system32-file values share the name '{leaf}': '{other}' and '{fullPath}'.");
+            seen[leaf] = fullPath;
+            resolved.Add(fullPath);
+        }
+        return resolved;
+    }
+
+    /// <summary>Copies the --system32-file files into the context's system32 folder (none: no folder).</summary>
+    public static void StageSystem32Files(IReadOnlyList<string> files, string context)
+    {
+        if (files.Count == 0) return;
+        var dir = Path.Combine(context, System32ContextFolder);
+        Directory.CreateDirectory(dir);
+        foreach (var file in files)
+            File.Copy(file, Path.Combine(dir, Path.GetFileName(file)), overwrite: true);
+        Log.Info($"Staged {files.Count} file(s) for C:\\Windows\\System32 (copied when missing): {string.Join(", ", files.Select(Path.GetFileName))}.");
     }
 
     /// <summary>Reads an --app-list file: one .app path per line; blank lines and '#' comments are ignored.</summary>

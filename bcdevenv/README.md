@@ -136,6 +136,15 @@ Apps can instead be installed **at bake time** by passing `--app-file` to
 reused in three places: host packaging, container build time, and against a live
 container.
 
+Windows Server Core, the default base image, has no `t2embed.dll` (font
+embedding), and rendering a report as PDF fails without it ("Unable to load DLL
+'T2Embed'"). Pass it with `build-image --system32-file <path>\t2embed.dll`
+(repeatable for other files): the image build copies each such file into
+`C:\Windows\System32` when the base image does not have it, as the official
+images do, checks that it is there, and warns when `t2embed.dll` is missing. The
+official images take it from `install\t2embed.dll` of
+[`nav-docker-install.zip`](https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip).
+
 ## Running tests
 
 `run-tests` runs the Business Central test suite against a **running** server
@@ -248,7 +257,8 @@ build mode it:
    invalid zip is deleted and downloaded again) and compiles the test runner app
    with that platform's AL compiler;
 3. `create-env` creates an **empty** platform database (no Cronus/demo data),
-   `build-image` provisions it with all the apps plus the test runner, sets the
+   `build-image` provisions it with all the apps plus the test runner (the image
+   also gets `t2embed.dll`, see below), sets the
    database's application family to the project's `country` (upper-cased; `w1`/`base`
    = `W1`), so that country-specific feature keys (e.g. FR `Payment`, GB
    `VATReverseCharge`) and `EnvironmentInformation.GetApplicationFamily()` match a
@@ -309,6 +319,24 @@ read with HTTP range requests, falling back to downloading the whole artifact).
 Licensing errors during provisioning are reported as such. `build-image` itself
 refuses to bake apps into a `create-env` database without `--license`.
 
+**Font embedding (`t2embed.dll`).** Windows Server Core, the image's base, has no
+`t2embed.dll`, and the server's report rendering fails without it when a report is
+saved as PDF ("Unable to load DLL 'T2Embed'", e.g. `Financial Report Mgt.` `Print`
+and the reminder automation tests). Like the official images (nav-docker's
+`navinstall.ps1`), the image gets it in `C:\Windows\System32` when it is missing
+(`build-image --system32-file`). The action reads only the `install/t2embed.dll`
+entry of the official images' install archive
+[`nav-docker-install.zip`](https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip)
+with HTTP range requests (falling back to downloading the whole archive, with
+retries) and checks that it is a DLL; it is never committed to the repository.
+Override the source with the action input `t2embedUrl` or the AL-Go setting
+`bcdevenvT2EmbedUrl` (a zip archive with a `t2embed.dll` entry, or the DLL itself).
+When it cannot be obtained, a warning is written and the image is built without it,
+so only PDF rendering fails. The image build logs `Copied t2embed.dll to
+C:\Windows\System32\t2embed.dll` (or that the file already exists). The Visual C++
+redistributable, which the official images also install, is not installed: no test
+failure has pointed to it.
+
 **Not supported** (the step fails with an explicit message): projects without
 workspace compilation, `testType` `Legacy` (demo data generated through a page
 action), and the RU projects (company initialization must be interleaved with the
@@ -319,9 +347,14 @@ client session through the development endpoint's test runner hub, while
 BcContainerHelper drives the test tool page (page 130455) through the web client's
 client services endpoint. The hub only lets the caller choose the codeunits and
 methods; the server's development test runner chooses the runner codeunit, so the
-AL hooks of the `Test Runner` app's runners 130450/130451 (for example the
-`Permissions Mock` start/stop around each method and the `Library - Random` seed) do
-not run, and tests that rely on them may behave differently. Sending a non-empty
+AL hooks of the `Test Runner` app's runners 130450/130451 do not run, and tests
+that rely on them may behave differently: the `Permissions Mock` start/stop around
+each method does not happen, so permission tests run as SUPER (about 31 failures
+per job), the `Library - Random` seed is not set, and `ALTestRunner Reset
+Environment` (codeunit 130453) does not reset the application area
+(`ApplicationArea('')`) before each method, so `TestPage` tests fail with "field/action
+not found" when an earlier test left a narrower application area (about 29 failures
+per job). Sending a non-empty
 method list (codeunits with some methods disabled) has not been verified against a
 live server yet. With `testExecutor: odata` the tests run in a web-service session
 instead, where `TestPage`s, report request pages and UI handlers fail with

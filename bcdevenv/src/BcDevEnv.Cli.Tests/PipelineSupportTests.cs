@@ -157,6 +157,56 @@ public class PipelineSupportTests
     }
 
     [Fact]
+    public void System32_files_are_validated_and_staged_flat()
+    {
+        using var source = new TempDir();
+        using var context = new TempDir();
+        var dll = source.Write(Path.Combine("a", "t2embed.dll"), "MZ-dll");
+
+        var files = BuildImageCommand.ResolveSystem32Files(new[] { dll, " " });
+        Assert.Equal(new[] { Path.GetFullPath(dll) }, files);
+
+        BuildImageCommand.StageSystem32Files(files, context.Path);
+        Assert.Equal("MZ-dll", File.ReadAllText(Path.Combine(context.Path, BuildImageCommand.System32ContextFolder, "t2embed.dll")));
+
+        // No files: no system32 folder in the context (the Dockerfile step is then a no-op).
+        using var empty = new TempDir();
+        BuildImageCommand.StageSystem32Files(BuildImageCommand.ResolveSystem32Files(Array.Empty<string>()), empty.Path);
+        Assert.False(Directory.Exists(Path.Combine(empty.Path, BuildImageCommand.System32ContextFolder)));
+    }
+
+    [Fact]
+    public void System32_files_reject_missing_files_and_name_collisions()
+    {
+        using var source = new TempDir();
+        var first = source.Write(Path.Combine("a", "t2embed.dll"), "1");
+        var second = source.Write(Path.Combine("b", "T2EMBED.DLL"), "2");
+
+        var missing = Assert.Throws<BcDevEnvException>(() => BuildImageCommand.ResolveSystem32Files(new[] { Path.Combine(source.Path, "none.dll") }));
+        Assert.Contains("not found", missing.Message);
+        var collision = Assert.Throws<BcDevEnvException>(() => BuildImageCommand.ResolveSystem32Files(new[] { first, second }));
+        Assert.Contains("share the name", collision.Message);
+    }
+
+    [Fact]
+    public void Dockerfile_copies_staged_system32_files_only_when_missing_and_verifies_them()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "container", "Dockerfile"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var dockerfile = File.ReadAllText(Path.Combine(dir!.FullName, "container", "Dockerfile"));
+
+        Assert.Contains(@"C:\bcdevenv\" + BuildImageCommand.System32ContextFolder, dockerfile);
+        Assert.Contains("if (Test-Path $target)", dockerfile);
+        Assert.Contains("is missing after the copy", dockerfile);
+        Assert.Contains("'t2embed.dll'", dockerfile);
+        // The copy must happen before provisioning, which starts the server.
+        var copyStep = dockerfile.IndexOf(@"Get-ChildItem C:\bcdevenv\" + BuildImageCommand.System32ContextFolder, StringComparison.Ordinal);
+        var provisionStep = dockerfile.IndexOf("bcdevenv.exe provision", StringComparison.Ordinal);
+        Assert.InRange(copyStep, 0, provisionStep);
+    }
+
+    [Fact]
     public void Dockerfile_installs_sql_with_the_staged_script_and_not_chocolatey()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

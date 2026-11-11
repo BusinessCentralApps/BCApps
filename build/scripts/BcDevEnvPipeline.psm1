@@ -40,6 +40,10 @@ $script:DefaultTestExecutor = 'altool'
 $script:AlToolPackageId = 'microsoft.dynamics.businesscentral.development.tools'
 $script:DefaultAlToolVersion = '30.0.44.47290-beta'
 $script:DefaultAppTestTimeoutMinutes = 240
+# Source of t2embed.dll (font embedding, needed to render reports as PDF), which Windows Server Core
+# lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
+# $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
+$script:DefaultT2EmbedUrl = 'https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip'
 
 <#
 .SYNOPSIS
@@ -765,6 +769,118 @@ function Get-BcDevEnvArtifactLicense {
     $path = Join-Path $Destination ($entryName -replace '^.*[\\/]', '')
     [System.IO.File]::WriteAllBytes($path, $bytes)
     Write-Host "Extracted the CRONUS license '$entryName' ($($bytes.Length) bytes) of the application artifact '$displayUrl' to '$path'."
+    return $path
+}
+
+<#
+.SYNOPSIS
+    Resolves the URL of t2embed.dll: the action input wins over the AL-Go setting bcdevenvT2EmbedUrl,
+    which wins over the install archive of the official Business Central images (nav-docker-install.zip).
+    The URL is a zip archive with t2embed.dll (install/t2embed.dll) or t2embed.dll itself.
+#>
+function Get-BcDevEnvT2EmbedUrl {
+    param(
+        [AllowNull()] $Settings,
+        [AllowEmptyString()] [string] $Url = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) { $Url = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvT2EmbedUrl' -Default '') }
+    if ([string]::IsNullOrWhiteSpace($Url)) { $Url = $script:DefaultT2EmbedUrl }
+    $Url = $Url.Trim()
+    $parsed = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$parsed) -or @('http', 'https') -notcontains $parsed.Scheme) {
+        throw "Invalid t2embed.dll URL '$Url'. Expected the http(s) URL of a zip archive with t2embed.dll or of t2embed.dll itself."
+    }
+    return $Url
+}
+
+<#
+.SYNOPSIS
+    Picks the t2embed.dll entry of an archive: install/t2embed.dll (the nav-docker-install.zip layout),
+    else the first entry named t2embed.dll (case-insensitive). Returns $null when there is none.
+#>
+function Select-BcDevEnvT2EmbedEntry {
+    param([AllowEmptyCollection()] [string[]] $EntryNames = @())
+
+    $match = @($EntryNames | Where-Object { ($_ -replace '\\', '/') -ieq 'install/t2embed.dll' }) | Select-Object -First 1
+    if (-not $match) { $match = @($EntryNames | Where-Object { ($_ -replace '^.*[\\/]', '') -ieq 't2embed.dll' }) | Select-Object -First 1 }
+    return $match
+}
+
+<#
+.SYNOPSIS
+    Downloads t2embed.dll to Destination and returns its path.
+.DESCRIPTION
+    Windows Server Core (the image's base) has no t2embed.dll, and the server's report rendering fails
+    without it when a report is saved as PDF ("Unable to load DLL 'T2Embed'"). The official images copy
+    it from nav-docker-install.zip into System32; build-image --system32-file does the same.
+    From a zip archive only the entry is read, with HTTP range requests (under 200 KB of the 35 MB
+    archive); when that is not possible the whole archive is downloaded (with retries) and the entry
+    extracted from it. A URL ending in .dll is downloaded as is. The file must be a PE image (MZ).
+#>
+function Get-BcDevEnvT2Embed {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Url,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+
+    $uri = [System.Uri]$Url
+    $displayUrl = $uri.GetLeftPart([System.UriPartial]::Path)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $path = Join-Path $Destination 't2embed.dll'
+    $entryName = 't2embed.dll'
+    [byte[]] $bytes = $null
+    if ($uri.AbsolutePath -match '\.dll$') {
+        Save-BcDevEnvDownload -Uri $Url -OutFile $path -Description "Downloading t2embed.dll from '$displayUrl'" | Out-Null
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+    }
+    else {
+        $missing = "The archive '$displayUrl' has no t2embed.dll entry."
+        $remote = $null
+        try {
+            $remote = Invoke-BcDevEnvWithRetry -Description "Reading t2embed.dll from '$displayUrl' (HTTP range requests)" -MaxAttempts 3 -InitialDelaySeconds 5 -ScriptBlock {
+                $directory = Get-BcDevEnvRemoteZipDirectory -Uri $Url
+                $name = Select-BcDevEnvT2EmbedEntry -EntryNames @($directory.Entries | ForEach-Object { $_.Name })
+                # A missing entry is not transient: report it without retrying.
+                if (-not $name) { return [pscustomobject]@{ Name = $null; Bytes = $null } }
+                $entry = @($directory.Entries | Where-Object { $_.Name -ceq $name }) | Select-Object -First 1
+                [pscustomobject]@{ Name = $name; Bytes = (Read-BcDevEnvRemoteZipEntry -Uri $Url -Entry $entry) }
+            }
+        }
+        catch {
+            Write-Host "Reading t2embed.dll with HTTP range requests failed ($($_.Exception.Message)); downloading the whole archive."
+        }
+        if ($null -ne $remote) {
+            if (-not $remote.Name) { throw $missing }
+            $entryName = $remote.Name
+            $bytes = $remote.Bytes
+        }
+        else {
+            $zipPath = Join-Path $Destination 't2embed-source.zip'
+            Save-BcDevEnvDownload -Uri $Url -OutFile $zipPath -ValidateZip -Description "Downloading '$displayUrl'" | Out-Null
+            try {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                try {
+                    $entryName = Select-BcDevEnvT2EmbedEntry -EntryNames @($zip.Entries | ForEach-Object { $_.FullName })
+                    if (-not $entryName) { throw $missing }
+                    $entry = @($zip.Entries | Where-Object { $_.FullName -ceq $entryName }) | Select-Object -First 1
+                    $stream = $entry.Open()
+                    $buffer = New-Object System.IO.MemoryStream
+                    try { $stream.CopyTo($buffer); $bytes = $buffer.ToArray() } finally { $stream.Dispose(); $buffer.Dispose() }
+                }
+                finally { $zip.Dispose() }
+            }
+            finally { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($null -eq $bytes -or $bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        throw "'$entryName' from '$displayUrl' is not a Windows DLL (no MZ header)."
+    }
+
+    [System.IO.File]::WriteAllBytes($path, $bytes)
+    Write-Host "Saved t2embed.dll ('$entryName', $($bytes.Length) bytes) from '$displayUrl' to '$path'."
     return $path
 }
 

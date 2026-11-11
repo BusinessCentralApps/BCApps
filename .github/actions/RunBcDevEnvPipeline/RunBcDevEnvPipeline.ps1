@@ -29,7 +29,8 @@ param(
     [string] $PreviousAppsPath = '',
     [string] $TestExecutor = '',
     [string] $AlToolVersion = '',
-    [string] $AppTestTimeoutMinutes = ''
+    [string] $AppTestTimeoutMinutes = '',
+    [string] $T2EmbedUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +103,9 @@ if ($plan.Action -eq 'Test') {
         Write-Host "Test executor: odata - the BcDevEnvTestRunner OData service selects and runs the tests"
     }
 }
+# Resolved up front so that an invalid configured URL fails before the long setup.
+$t2embedSource = Get-BcDevEnvT2EmbedUrl -Settings $settings -Url $T2EmbedUrl
+Write-Host "t2embed.dll:   $(([System.Uri]$t2embedSource).GetLeftPart([System.UriPartial]::Path))"
 if ($PreviousAppsPath -and (Test-Path -LiteralPath $PreviousAppsPath)) {
     Write-Host "::notice::Previous release apps were downloaded, but the bcdevenv pipeline installs into an empty database and does not perform upgrade testing."
 }
@@ -243,6 +247,19 @@ try {
         Write-Host "::warning::No license secret '$LicenseSecretName' is available; the apps are installed and tested with the CRONUS license of the AL-Go application artifact ($artifactDisplayUrl). Licensing errors are reported as such; provide a license through the '$LicenseSecretName' secret if the apps need more."
     }
 
+    # --- t2embed.dll ------------------------------------------------------------------------------------
+    # Windows Server Core lacks t2embed.dll (font embedding); without it rendering reports as PDF fails
+    # with "Unable to load DLL 'T2Embed'". The image copies it into System32 when missing, like the
+    # official images. A failed download only costs the PDF rendering tests, which then fail visibly.
+    Write-Section 't2embed.dll (font embedding for PDF report rendering)'
+    $t2embedPath = $null
+    try {
+        $t2embedPath = Get-BcDevEnvT2Embed -Url $t2embedSource -Destination (Join-Path $work 't2embed')
+    }
+    catch {
+        Write-Host "::warning::t2embed.dll could not be obtained ($($_.Exception.Message)); the image is built without it, so rendering reports as PDF fails in the container (Unable to load DLL 'T2Embed')."
+    }
+
     # --- Empty database, image, container -------------------------------------------------------------
     Write-Section 'Create the empty platform database'
     Invoke-BcDevEnvNativeCommand -FilePath $bcdevenv -Arguments @('create-env', '--platform', $platformDir, '--country', $plan.Country, '--name', $names.EnvName, '--sql-server', 'localhost', '--sql-instance', 'SQLEXPRESS') -Description 'bcdevenv create-env' | Out-Null
@@ -257,6 +274,7 @@ try {
     foreach ($codeunit in @($plan.CompanyCodeunits)) { $buildArguments += @('--company-codeunit', $codeunit) }
     foreach ($setting in @($plan.ServerSettings)) { $buildArguments += @('--server-setting', $setting) }
     if ($licensePath) { $buildArguments += @('--license', $licensePath) }
+    if ($t2embedPath) { $buildArguments += @('--system32-file', $t2embedPath) }
     # The Docker engine was seen to stop mid-job on hosted runners; re-check it before the long build.
     Wait-BcDevEnvDockerEngine -ServiceName 'docker' -TimeoutSeconds 300 | Out-Null
     Invoke-BcDevEnvNativeCommand -FilePath $bcdevenv -Arguments $buildArguments -Description 'bcdevenv build-image (provisioning the empty database with the apps)' | Out-Null

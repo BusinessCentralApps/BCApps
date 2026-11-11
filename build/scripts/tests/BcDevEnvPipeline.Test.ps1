@@ -926,6 +926,123 @@ Describe "Get-BcDevEnvArtifactLicense" {
     }
 }
 
+Describe "t2embed.dll" {
+    BeforeAll {
+        function New-T2EmbedZip {
+            param([System.Collections.Specialized.OrderedDictionary] $Entries)
+            $path = Join-Path $TestDrive "install-$([guid]::NewGuid().ToString('N')).zip"
+            $archive = [System.IO.Compression.ZipFile]::Open($path, [System.IO.Compression.ZipArchiveMode]::Create)
+            foreach ($name in $Entries.Keys) {
+                $stream = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open()
+                $bytes = [byte[]]$Entries[$name]
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Dispose()
+            }
+            $archive.Dispose()
+            return [System.IO.File]::ReadAllBytes($path)
+        }
+
+        $random = New-Object System.Random 7
+        $script:dll = [byte[]]::new(50000)
+        $random.NextBytes($script:dll)
+        $script:dll[0] = 0x4D
+        $script:dll[1] = 0x5A
+        $script:otherDll = [byte[]]$script:dll.Clone()
+        $script:otherDll[2] = [byte](($script:otherDll[2] + 1) % 256)
+        $filler = [byte[]]::new(300000)
+        $random.NextBytes($filler)
+        $script:installZip = New-T2EmbedZip -Entries ([ordered]@{
+                'install/filler.bin'         = $filler
+                'install/t2embed.dll'        = $script:dll
+                'Run/navinstall.ps1'         = [System.Text.Encoding]::UTF8.GetBytes('# navinstall')
+            })
+        $script:noDllZip = New-T2EmbedZip -Entries ([ordered]@{ 'install/readme.txt' = [byte[]](1, 2, 3) })
+        $script:notPeZip = New-T2EmbedZip -Entries ([ordered]@{ 'install/t2embed.dll' = [System.Text.Encoding]::UTF8.GetBytes('<html>not found</html>') })
+    }
+
+    BeforeEach {
+        Mock -ModuleName BcDevEnvPipeline Start-Sleep { }
+        Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { throw 'The whole archive must not be downloaded.' }
+        $script:served = $script:installZip
+        $script:rangeRequests = 0
+        $script:rangeBytes = 0
+        Mock -ModuleName BcDevEnvPipeline Invoke-BcDevEnvHttpRangeRequest {
+            $script:rangeRequests++
+            $all = $script:served
+            if ($null -eq $From) { $start = [Math]::Max(0, $all.Length - $To); $end = $all.Length - 1 }
+            else { $start = $From; $end = [Math]::Min($To, $all.Length - 1) }
+            $count = $end - $start + 1
+            $script:rangeBytes += $count
+            $bytes = [byte[]]::new($count)
+            [System.Array]::Copy($all, $start, $bytes, 0, $count)
+            [pscustomobject]@{ Bytes = $bytes; Offset = [long]$start; Length = [long]$all.Length }
+        }
+        $destination = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+    }
+
+    It "selects install/t2embed.dll, else any t2embed.dll entry" {
+        Select-BcDevEnvT2EmbedEntry -EntryNames @('other/t2embed.dll', 'Install/T2EMBED.DLL') | Should -Be 'Install/T2EMBED.DLL'
+        Select-BcDevEnvT2EmbedEntry -EntryNames @('install\t2embed.dll') | Should -Be 'install\t2embed.dll'
+        Select-BcDevEnvT2EmbedEntry -EntryNames @('readme.txt', 'x/y/T2Embed.dll') | Should -Be 'x/y/T2Embed.dll'
+        Select-BcDevEnvT2EmbedEntry -EntryNames @('install/t2embed.dll.bak', 'install/readme.txt') | Should -BeNullOrEmpty
+        Select-BcDevEnvT2EmbedEntry -EntryNames @() | Should -BeNullOrEmpty
+    }
+
+    It "resolves the URL from the input, else the setting, else nav-docker-install.zip" {
+        Get-BcDevEnvT2EmbedUrl -Settings ([pscustomobject]@{}) | Should -Be 'https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip'
+        Get-BcDevEnvT2EmbedUrl -Settings $null -Url ' ' | Should -BeLike '*/prerequisites/nav-docker-install.zip'
+        $settings = [pscustomobject]@{ bcdevenvT2EmbedUrl = 'https://mirror.test/install.zip' }
+        Get-BcDevEnvT2EmbedUrl -Settings $settings | Should -Be 'https://mirror.test/install.zip'
+        Get-BcDevEnvT2EmbedUrl -Settings $settings -Url ' https://input.test/t2embed.dll ' | Should -Be 'https://input.test/t2embed.dll'
+        { Get-BcDevEnvT2EmbedUrl -Settings $null -Url 'C:\t2embed.dll' } | Should -Throw '*Invalid t2embed.dll URL*'
+        { Get-BcDevEnvT2EmbedUrl -Settings ([pscustomobject]@{ bcdevenvT2EmbedUrl = 'install.zip' }) } | Should -Throw '*Invalid t2embed.dll URL*'
+    }
+
+    It "reads only the t2embed.dll entry with range requests" {
+        $path = Get-BcDevEnvT2Embed -Url 'https://example.test/prerequisites/nav-docker-install.zip?sv=secret' -Destination $destination 6>$null
+        $path | Should -Be (Join-Path $destination 't2embed.dll')
+        [System.IO.File]::ReadAllBytes($path) | Should -Be $script:dll
+        Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 0 -Exactly
+        $script:rangeRequests | Should -Be 3
+        $script:rangeBytes | Should -BeLessThan ($script:installZip.Length / 2)
+        @(Get-ChildItem -LiteralPath $destination | ForEach-Object { $_.Name }) | Should -Be @('t2embed.dll')
+    }
+
+    It "downloads the whole archive when range requests fail, and deletes it afterwards" {
+        Mock -ModuleName BcDevEnvPipeline Invoke-BcDevEnvHttpRangeRequest { throw [System.NotSupportedException]::new('HTTP 200') }
+        Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { [System.IO.File]::WriteAllBytes($OutFile, $script:installZip) }
+        $path = Get-BcDevEnvT2Embed -Url 'https://example.test/prerequisites/nav-docker-install.zip' -Destination $destination 6>$null
+        [System.IO.File]::ReadAllBytes($path) | Should -Be $script:dll
+        Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 1 -Exactly
+        @(Get-ChildItem -LiteralPath $destination | ForEach-Object { $_.Name }) | Should -Be @('t2embed.dll')
+    }
+
+    It "downloads a .dll URL as is" {
+        Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { [System.IO.File]::WriteAllBytes($OutFile, $script:otherDll) }
+        $path = Get-BcDevEnvT2Embed -Url 'https://mirror.test/files/T2Embed.dll' -Destination $destination 6>$null
+        [System.IO.File]::ReadAllBytes($path) | Should -Be $script:otherDll
+        $script:rangeRequests | Should -Be 0
+        Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 1 -Exactly
+    }
+
+    It "fails without retrying or downloading the whole archive when it has no t2embed.dll" {
+        $script:served = $script:noDllZip
+        { Get-BcDevEnvT2Embed -Url 'https://example.test/install.zip' -Destination $destination 6>$null } | Should -Throw '*has no t2embed.dll entry*'
+        Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke -ModuleName BcDevEnvPipeline Start-Sleep -Times 0 -Exactly
+    }
+
+    It "rejects a payload that is not a DLL" {
+        $script:served = $script:notPeZip
+        { Get-BcDevEnvT2Embed -Url 'https://example.test/install.zip' -Destination $destination 6>$null } | Should -Throw '*not a Windows DLL*'
+        Test-Path -LiteralPath (Join-Path $destination 't2embed.dll') | Should -BeFalse
+
+        Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { [System.IO.File]::WriteAllBytes($OutFile, [System.Text.Encoding]::UTF8.GetBytes('<html/>')) }
+        { Get-BcDevEnvT2Embed -Url 'https://mirror.test/t2embed.dll' -Destination $destination 6>$null } | Should -Throw '*not a Windows DLL*'
+        Test-Path -LiteralPath (Join-Path $destination 't2embed.dll') | Should -BeFalse
+    }
+}
+
 Describe "Initialize-BcDevEnvSqlServer" {
     BeforeEach {
         $script:marker = Join-Path $TestDrive "sql-installed-$([guid]::NewGuid().ToString('N')).txt"

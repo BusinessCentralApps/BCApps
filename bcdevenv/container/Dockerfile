@@ -15,6 +15,7 @@
 #   binaries\WebClient\*       - specified-version web client binaries (optional)
 #   apps\*.app                 - optional bake-time app packages
 #   license\*.bclicense        - license (required when apps are baked into an empty create-env DB)
+#   system32\*                 - optional DLLs copied into System32 when missing (e.g. t2embed.dll)
 #   build-manifest.json        - DB name, country, instance, credential type, apps
 #   cli\*                      - the self-contained bcdevenv CLI (provision + serve)
 #
@@ -73,6 +74,20 @@ COPY . C:/bcdevenv/
 
 RUN if (Test-Path C:\bcdevenv\binaries\Service)   { robocopy C:\bcdevenv\binaries\Service   C:\bc\Service   /E /NFL /NDL /NJH /NJS | Out-Null; if ($LASTEXITCODE -ge 8) { exit 1 } }; exit 0
 RUN if (Test-Path C:\bcdevenv\binaries\WebClient) { robocopy C:\bcdevenv\binaries\WebClient C:\bc\WebClient /E /NFL /NDL /NJH /NJS | Out-Null; if ($LASTEXITCODE -ge 8) { exit 1 } }; exit 0
+
+# System DLLs the base image lacks (build-image --system32-file), copied into System32 only
+# when missing, like the official images (nav-docker navinstall.ps1), and checked afterwards.
+# Windows Server Core has no t2embed.dll (font embedding): without it the server's report
+# rendering fails with "Unable to load DLL 'T2Embed'" when a report is saved as PDF.
+RUN $system32 = Join-Path $env:SystemRoot 'System32'; \
+    if (Test-Path C:\bcdevenv\system32) { \
+      foreach ($file in Get-ChildItem C:\bcdevenv\system32 -File) { \
+        $target = Join-Path $system32 $file.Name; \
+        if (Test-Path $target) { Write-Host ($target + ' already exists; kept.') } else { Copy-Item $file.FullName $target; Write-Host ('Copied ' + $file.Name + ' to ' + $target) }; \
+        if (-not (Test-Path $target -PathType Leaf)) { throw ($target + ' is missing after the copy.') } \
+      } \
+    }; \
+    if (-not (Test-Path (Join-Path $system32 't2embed.dll') -PathType Leaf)) { Write-Host 'WARNING: C:\Windows\System32\t2embed.dll is missing; rendering reports as PDF fails (Unable to load DLL T2Embed). Pass build-image --system32-file with the path of a t2embed.dll.' }
 
 # ---------------------------------------------------------------------------
 # 3. Provision: start SQL (+ Full-Text Search) + SQL Browser, then restore the DB, register +

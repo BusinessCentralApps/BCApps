@@ -170,6 +170,10 @@ build-image - Stage the .bak + platform Service/WebClient binaries (from the
                             apps into the empty create-env database, which holds no
                             license - e.g. the CRONUS license (Cronus.bclicense) of a
                             Business Central application artifact
+  --system32-file <path>    File copied into C:\Windows\System32 of the image when the base
+                            image does not have it; repeatable. E.g. t2embed.dll (from
+                            nav-docker-install.zip, install\t2embed.dll): Windows Server Core
+                            lacks it, and rendering reports as PDF fails without it
   --registry <host>         Registry to prefix the tag with
   --push                    Push the image after building (never push an image that
                             contains a private license)
