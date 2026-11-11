@@ -1133,8 +1133,13 @@ Describe "t2embed.dll" {
 Describe "Initialize-BcDevEnvSqlServer" {
     BeforeEach {
         $script:marker = Join-Path $TestDrive "sql-installed-$([guid]::NewGuid().ToString('N')).txt"
+        $script:diagnosticsMarker = Join-Path $TestDrive "sql-diagnostics-$([guid]::NewGuid().ToString('N')).txt"
         $installScript = Join-Path $TestDrive 'Install-SqlExpress.ps1'
-        Set-Content -LiteralPath $installScript -Value "param([string] `$InstanceName) Set-Content -LiteralPath '$script:marker' -Value `$InstanceName"
+        Set-Content -LiteralPath $installScript -Value @(
+            'param([string] $InstanceName, [switch] $DiagnosticsOnly)'
+            "if (`$DiagnosticsOnly) { Set-Content -LiteralPath '$script:diagnosticsMarker' -Value `$InstanceName; return }"
+            "Set-Content -LiteralPath '$script:marker' -Value `$InstanceName"
+        )
         Mock -ModuleName BcDevEnvPipeline Get-Service { if (Test-Path -LiteralPath $script:marker) { [pscustomobject]@{ Name = $Name; Status = 'Running' } } }
         Mock -ModuleName BcDevEnvPipeline Set-Service { }
         Mock -ModuleName BcDevEnvPipeline Start-Service { }
@@ -1143,6 +1148,7 @@ Describe "Initialize-BcDevEnvSqlServer" {
         Mock -ModuleName BcDevEnvPipeline Set-Acl { }
         Mock -ModuleName BcDevEnvPipeline fsutil { @('PhysicalBytesPerSectorForAtomicity :                    4096', 'PhysicalBytesPerSectorForPerformance :                  4096') }
         Mock -ModuleName BcDevEnvPipeline Get-ItemProperty { }
+        Mock -ModuleName BcDevEnvPipeline Test-BcDevEnvSqlConnection { $true }
         $previousHome = $env:BCDEVENV_HOME
     }
 
@@ -1187,6 +1193,63 @@ Describe "Initialize-BcDevEnvSqlServer" {
         { Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome (Join-Path $TestDrive 'home') -InstallScript (Join-Path $TestDrive 'missing.ps1') } |
             Should -Throw "*service 'MSSQL`$SQLEXPRESS' not found and no SQL Server Express install script*"
     }
+
+    It "fails with the instance's diagnostics when its service does not start again after enabling the network protocols" {
+        Set-Content -LiteralPath $script:marker -Value 'installed'
+        $script:protocol = [Microsoft.Management.Infrastructure.CimInstance]::new('ServerNetworkProtocol')
+        foreach ($property in @{ InstanceName = 'SQLEXPRESS'; ProtocolName = 'Tcp'; Enabled = $false }.GetEnumerator()) {
+            $script:protocol.CimInstanceProperties.Add([Microsoft.Management.Infrastructure.CimProperty]::Create($property.Key, $property.Value, [Microsoft.Management.Infrastructure.CimFlags]::None))
+        }
+        Mock -ModuleName BcDevEnvPipeline Get-CimInstance { [pscustomobject]@{ Name = 'ComputerManagement16' } } -ParameterFilter { $ClassName -eq '__NAMESPACE' }
+        Mock -ModuleName BcDevEnvPipeline Get-CimInstance { $script:protocol } -ParameterFilter { $ClassName -eq 'ServerNetworkProtocol' }
+        Mock -ModuleName BcDevEnvPipeline Invoke-CimMethod { }
+        Mock -ModuleName BcDevEnvPipeline Restart-Service { throw "Failed to start service 'SQL Server (SQLEXPRESS) (MSSQL`$SQLEXPRESS)'." } -ParameterFilter { $Name -eq 'MSSQL$SQLEXPRESS' }
+        Mock -ModuleName BcDevEnvPipeline Test-BcDevEnvSqlConnection { $false }
+        { Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome (Join-Path $TestDrive 'home') -InstallScript $installScript 6>$null 3>$null } |
+            Should -Throw "*SQL Server 'localhost\SQLEXPRESS' is not usable: restarting its service after enabling the network protocols failed: Failed to start service 'SQL Server (SQLEXPRESS)*"
+        Should -Invoke -ModuleName BcDevEnvPipeline Invoke-CimMethod -Times 1 -Exactly
+        Get-Content -LiteralPath $script:diagnosticsMarker | Should -Be 'SQLEXPRESS'
+        $env:BCDEVENV_HOME | Should -Be $previousHome
+    }
+
+    It "fails with the instance's diagnostics when a running instance does not accept a connection" {
+        Set-Content -LiteralPath $script:marker -Value 'installed'
+        Mock -ModuleName BcDevEnvPipeline Test-BcDevEnvSqlConnection { $false }
+        { Initialize-BcDevEnvSqlServer -Instance 'SQLEXPRESS' -DataHome (Join-Path $TestDrive 'home') -InstallScript $installScript 6>$null } |
+            Should -Throw "*SQL Server 'localhost\SQLEXPRESS' is not usable: it does not accept a shared-memory connection*"
+        Test-Path -LiteralPath $script:diagnosticsMarker | Should -BeTrue
+    }
+}
+
+Describe "Test-BcDevEnvSqlConnection" {
+    It "connects over shared memory and runs SELECT 1, retrying until the instance serves" {
+        $script:connection = @{ Opens = 0; Strings = [System.Collections.Generic.List[string]]::new(); Queries = [System.Collections.Generic.List[string]]::new() }
+        Mock -ModuleName BcDevEnvPipeline Start-Sleep { }
+        Mock -ModuleName BcDevEnvPipeline New-Object {
+            $script:connection.Strings.Add([string] @($ArgumentList)[0])
+            $fake = [pscustomobject]@{ }
+            $fake | Add-Member -MemberType ScriptMethod -Name Open -Value {
+                $script:connection.Opens++
+                if ($script:connection.Opens -lt 2) { throw 'A network-related or instance-specific error occurred (provider: Shared Memory Provider, error: 40)' }
+            }
+            $fake | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+                $command = [pscustomobject]@{ CommandText = '' }
+                $command | Add-Member -MemberType ScriptMethod -Name ExecuteScalar -Value { $script:connection.Queries.Add($this.CommandText); 1 }
+                $command
+            }
+            $fake | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+            $fake
+        } -ParameterFilter { $TypeName -eq 'System.Data.SqlClient.SqlConnection' }
+        Test-BcDevEnvSqlConnection -Instance 'SQLEXPRESS' -Attempts 3 | Should -BeTrue
+        $script:connection.Opens | Should -Be 2
+        $script:connection.Strings[0] | Should -BeLike 'Data Source=lpc:.\SQLEXPRESS;Integrated Security=True;*'
+        @($script:connection.Queries) | Should -Be @('SELECT 1')
+        Should -Invoke -ModuleName BcDevEnvPipeline Start-Sleep -Times 1 -Exactly
+    }
+
+    It "returns false for an instance that does not exist" {
+        Test-BcDevEnvSqlConnection -Instance 'BCDEVENVNOTEXISTING' -Attempts 1 6>$null | Should -BeFalse
+    }
 }
 
 Describe "Get-BcDevEnvVolumeSectorSize" {
@@ -1218,15 +1281,37 @@ Describe "Install-SqlExpress.ps1" {
     BeforeEach {
         # The mocks run inside Install-SqlExpress.ps1, whose $script: scope is its own, so the state is a
         # hashtable that the mock bodies find through the dynamic scope chain.
-        $sql = @{ SetupRuns = 0; SucceedsOnRun = 1; RegisteredAfterFailure = $false; Processes = [System.Collections.Generic.List[string]]::new()
+        # ExitCodes: setup's exit code per install run (default 0); the service runs from run SucceedsOnRun
+        # and the engine accepts connections from run ConnectsFromRun.
+        $sql = @{ SetupRuns = 0; SucceedsOnRun = 1; ConnectsFromRun = 1; Connects = 0; ExitCodes = @{ }; RegisteredAfterFailure = $false
+            Processes = [System.Collections.Generic.List[string]]::new(); ConnectionStrings = [System.Collections.Generic.List[string]]::new()
             Sectors = @{ $systemDrive = 4096 }; VirtualDiskWorks = $true; DiskPart = [System.Collections.Generic.List[string]]::new() }
         $workFolder = Join-Path $TestDrive "sql-$([guid]::NewGuid().ToString('N'))"
         Mock Invoke-WebRequest { [System.IO.File]::WriteAllBytes($OutFile, $installerBytes) }
         Mock Start-Sleep { }
         Mock Set-Service { }
         Mock Start-Service { }
+        Mock Get-WinEvent { }
         # Never touch a real SQL Server installation or disk of the machine that runs the tests.
-        Mock Get-ChildItem { } -ParameterFilter { "$Path" -like '*Microsoft SQL Server*' -or "$Path" -like '*SQLData*' }
+        Mock Get-ChildItem { } -ParameterFilter { "$Path" -like '*Microsoft SQL Server*' -or "$Path" -like '*SQLData*' -or "$Path" -like '*SQLServer*' }
+        Mock New-Object {
+            $sql.Connects++
+            $sql.ConnectionStrings.Add([string] @($ArgumentList)[0])
+            $fake = [pscustomobject]@{ }
+            if ($sql.SetupRuns -ge $sql.ConnectsFromRun) {
+                $fake | Add-Member -MemberType ScriptMethod -Name Open -Value { }
+            }
+            else {
+                $fake | Add-Member -MemberType ScriptMethod -Name Open -Value { throw 'A network-related or instance-specific error occurred while establishing a connection to SQL Server. (provider: Shared Memory Provider, error: 40 - Could not open a connection to SQL Server)' }
+            }
+            $fake | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+                $command = [pscustomobject]@{ CommandText = '' }
+                $command | Add-Member -MemberType ScriptMethod -Name ExecuteScalar -Value { if ($this.CommandText -ne 'SELECT 1') { throw "unexpected query '$($this.CommandText)'" }; 1 }
+                $command
+            }
+            $fake | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+            $fake
+        } -ParameterFilter { $TypeName -eq 'System.Data.SqlClient.SqlConnection' }
         Mock Get-PSDrive { @('C', 'D', 'S') | ForEach-Object { [pscustomobject]@{ Name = $_ } } }
         Mock fsutil {
             $size = $sql.Sectors[[string] $args[2]]
@@ -1257,16 +1342,39 @@ Describe "Install-SqlExpress.ps1" {
                 Set-Content -LiteralPath (Join-Path $media 'setup.exe') -Value 'setup'
             }
             elseif ($arguments -like '*/ACTION=Install*') { $sql.SetupRuns++ }
-            [pscustomobject]@{ ExitCode = if ($arguments -like '*/ACTION=Install*') { -2061893607 } else { 0 } }
+            $exitCode = 0
+            if ($arguments -like '*/ACTION=Install*' -and $sql.ExitCodes.ContainsKey($sql.SetupRuns)) { $exitCode = $sql.ExitCodes[$sql.SetupRuns] }
+            [pscustomobject]@{ ExitCode = $exitCode }
+        }
+        # Runs the script and returns its host output, also when it throws (the error is in $thrown).
+        function Invoke-InstallSqlExpress([hashtable] $Parameters = @{ }) {
+            $lines = [System.Collections.Generic.List[string]]::new()
+            $script:thrown = ''
+            try { & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 @Parameters 6>&1 | ForEach-Object { $lines.Add([string] $_) } }
+            catch { $script:thrown = $_.Exception.Message }
+            return ($lines -join "`n")
         }
     }
 
-    It "leaves a running instance alone" {
+    It "leaves a running instance alone that accepts connections" {
         $sql.SetupRuns = 1
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         $sql.Processes.Count | Should -Be 0
+        $sql.Connects | Should -Be 1
+        $sql.ConnectionStrings[0] | Should -BeLike 'Data Source=lpc:.\SQLEXPRESS;Integrated Security=True;*'
         Should -Invoke Set-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'MSSQLFDLauncher$SQLEXPRESS' -and $StartupType -eq 'Automatic' }
+    }
+
+    It "installs again a running instance that does not accept connections" {
+        $sql.SetupRuns = 1
+        $sql.ConnectsFromRun = 2
+        $output = Invoke-InstallSqlExpress @{ ConnectionTimeoutSeconds = 10 }
+        $script:thrown | Should -BeNullOrEmpty
+        $output | Should -BeLike "*SQL Server instance 'SQLEXPRESS' runs but does not accept connections; installing it again.*"
+        $sql.Processes | Should -Contain 'setup.exe /Q /ACTION=Uninstall /FEATURES=SQLENGINE,FULLTEXT /INSTANCENAME=SQLEXPRESS'
+        $sql.SetupRuns | Should -Be 2
+        $output | Should -BeLike "*SQL Server Express instance 'SQLEXPRESS' is installed, running and accepting connections.*"
     }
 
     It "warns when a running instance has no Full-Text Search service" {
@@ -1277,25 +1385,95 @@ Describe "Install-SqlExpress.ps1" {
         Should -Invoke Set-Service -Times 0 -Exactly
     }
 
-    It "downloads, extracts and installs engine and Full-Text Search, judging success by the service and not by the exit code" {
+    It "downloads, extracts and installs engine and Full-Text Search, and checks that the engine accepts a connection" {
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
         $sql.Processes[0] | Should -BeLike 'SQLEXPRADV_x64_ENU.exe /Q /x:*'
         $sql.Processes[1] | Should -BeLike 'setup.exe /IACCEPTSQLSERVERLICENSETERMS /Q /ACTION=Install /FEATURES=SQLENGINE,FULLTEXT /INSTANCEID=SQLEXPRESS /INSTANCENAME=SQLEXPRESS*'
         $sql.Processes.Count | Should -Be 2
+        $sql.Connects | Should -Be 1
         Test-Path -LiteralPath $workFolder | Should -BeFalse
         Should -Invoke Set-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'MSSQLFDLauncher$SQLEXPRESS' -and $StartupType -eq 'Automatic' }
+        $sql.Processes[1] | Should -Not -BeLike '*/INSTANCEDIR*'
         $sql.Processes[1] | Should -Not -BeLike '*/INSTALLSQLDATADIR*'
         Should -Invoke diskpart -Times 0 -Exactly
     }
 
-    It "puts the data files on a 4 KB virtual disk when the Program Files volume reports a larger sector size" {
+    It "accepts setup's exit code 3010 (success, a reboot is required)" {
+        $sql.ExitCodes[1] = 3010
+        $output = Invoke-InstallSqlExpress
+        $script:thrown | Should -BeNullOrEmpty
+        $output | Should -BeLike '*SQL Server setup exited with code 3010 (0x00000BC2: success, a reboot is required).*'
+        $sql.SetupRuns | Should -Be 1
+    }
+
+    It "fails an attempt whose setup exits with 0x851A001A although the service runs, prints the diagnostics and retries" {
+        $sql.ExitCodes[1] = -2061893606
+        $summary = Join-Path $TestDrive 'Summary.txt'
+        Set-Content -LiteralPath $summary -Value 'Exit message: Wait on the Database Engine recovery handle failed.'
+        $errorLog = Join-Path $TestDrive 'ERRORLOG'
+        Set-Content -LiteralPath $errorLog -Value 'Error: 5178, Severity: 16, State: 1. Cannot use file ... sector size 4096 ... 8192.'
+        Mock Get-ChildItem { Get-Item -LiteralPath $summary } -ParameterFilter { "$Path" -like '*\Setup Bootstrap\Log\Summary.txt' }
+        Mock Get-ChildItem { Get-Item -LiteralPath $errorLog } -ParameterFilter { "$Path" -like '*\Microsoft SQL Server\MSSQL*.SQLEXPRESS\MSSQL\Log\ERRORLOG' }
+        Mock Get-WinEvent { [pscustomobject]@{ TimeCreated = [datetime] '2026-01-02T03:04:05'; Id = 17204; Message = "FCB::Open failed:`r`n Could not open file master.mdf" } }
+        $output = Invoke-InstallSqlExpress
+        $script:thrown | Should -BeNullOrEmpty
+        $output | Should -BeLike "*SQL Server setup attempt 1 of 3 for instance 'SQLEXPRESS' failed: setup exited with code -2061893606 (0x851A001A: Wait on the Database Engine recovery handle failed), although the service 'MSSQL`$SQLEXPRESS' runs.*"
+        $output | Should -BeLike '*Exit message: Wait on the Database Engine recovery handle failed.*'
+        $output | Should -BeLike '*Error: 5178, Severity: 16*'
+        $output | Should -BeLike '*2026-01-02T03:04:05 event 17204: FCB::Open failed: Could not open file master.mdf*'
+        # The service of the failed attempt runs, so the instance is uninstalled before the second attempt, which succeeds.
+        $sql.SetupRuns | Should -Be 2
+        $sql.Processes | Should -Contain 'setup.exe /Q /ACTION=Uninstall /FEATURES=SQLENGINE,FULLTEXT /INSTANCENAME=SQLEXPRESS'
+        # A failed exit code fails the attempt without trying to connect.
+        $sql.Connects | Should -Be 1
+        $output | Should -BeLike "*SQL Server Express instance 'SQLEXPRESS' is installed, running and accepting connections.*"
+    }
+
+    It "fails an attempt whose instance runs after setup exits with 0 but does not accept a connection" {
+        $sql.ConnectsFromRun = 99
+        $output = Invoke-InstallSqlExpress @{ SetupAttempts = 1; ConnectionTimeoutSeconds = 20 }
+        $script:thrown | Should -BeLike "Installing SQL Server Express instance 'SQLEXPRESS' failed after 1 attempt(s) (last attempt: the service 'MSSQL`$SQLEXPRESS' runs, but the engine does not accept a connection); see the setup diagnostics above."
+        $output | Should -BeLike "*does not accept a connection (2 attempt(s)): A network-related or instance-specific error occurred*"
+        $output | Should -BeLike "*No setup summary (Summary.txt) found under*"
+        $output | Should -BeLike "*No ERRORLOG of instance 'SQLEXPRESS' found*"
+        $sql.Connects | Should -Be 2
+    }
+
+    It "prints the diagnostics without downloading or installing with -DiagnosticsOnly" {
+        $summary = Join-Path $TestDrive 'Summary.txt'
+        Set-Content -LiteralPath $summary -Value 'Overall summary: Failed'
+        Mock Get-ChildItem { Get-Item -LiteralPath $summary } -ParameterFilter { "$Path" -like '*\Setup Bootstrap\Log\Summary.txt' }
+        $output = Invoke-InstallSqlExpress @{ DiagnosticsOnly = $true }
+        $script:thrown | Should -BeNullOrEmpty
+        $output | Should -BeLike '*Overall summary: Failed*'
+        $output | Should -BeLike "*SQL Server instance 'SQLEXPRESS' is not registered.*"
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        $sql.Processes.Count | Should -Be 0
+        $sql.Connects | Should -Be 0
+    }
+
+    It "puts the instance and its data files on a 4 KB virtual disk when the Program Files volume reports a larger sector size" {
         $sql.Sectors[$systemDrive] = 8192
         $vhdx = Join-Path $TestDrive 'sqldata.vhdx'
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -VirtualDiskPath $vhdx 6>$null
         $sql.DiskPart.Count | Should -Be 1
         $sql.DiskPart[0] | Should -Be "create vdisk file=`"$vhdx`" maximum=131072 type=expandable; select vdisk file=`"$vhdx`"; attach vdisk; create partition primary; format fs=ntfs quick label=`"bcdevenv-sql`"; assign letter=T"
-        $sql.Processes[1] | Should -BeLike '* /ACTION=Install * /INSTALLSQLDATADIR="T:\SQLData"'
+        $sql.Processes[1] | Should -BeLike '* /ACTION=Install * /INSTANCEDIR="T:\SQLServer" /INSTALLSQLDATADIR="T:\SQLData"'
         $sql.SetupRuns | Should -Be 1
+    }
+
+    It "names the 8 KB-sector workaround in the error when setup fails on the virtual disk, with the ERRORLOG of its data directory" {
+        $sql.Sectors[$systemDrive] = 8192
+        $sql.ExitCodes[1] = -2061893606
+        $vhdx = Join-Path $TestDrive 'sqldata.vhdx'
+        $errorLog = Join-Path $TestDrive 'ERRORLOG'
+        Set-Content -LiteralPath $errorLog -Value 'Error: 17204, Severity: 16, State: 1. FCB::Open failed'
+        Mock Get-ChildItem { Get-Item -LiteralPath $errorLog } -ParameterFilter { "$Path" -like 'T:\SQLData\MSSQL*.SQLEXPRESS\MSSQL\Log\ERRORLOG' }
+        $output = Invoke-InstallSqlExpress @{ VirtualDiskPath = $vhdx; SetupAttempts = 1 }
+        $script:thrown | Should -BeLike "Installing SQL Server Express instance 'SQLEXPRESS' failed after 1 attempt(s) (last attempt: setup exited with code -2061893606 (0x851A001A: Wait on the Database Engine recovery handle failed), although the service 'MSSQL`$SQLEXPRESS' runs); see the setup diagnostics above. Note: the 8 KB-sector workaround was active: the volume of '*' reports 8192-byte physical sectors, so the instance ('T:\SQLServer') and its data files ('T:\SQLData') were put on the virtual disk volume T: (4096-byte sectors, '*sqldata.vhdx')."
+        $output | Should -BeLike '*Error: 17204, Severity: 16*'
+        $output | Should -BeLike "*Physical sector size of the volume of 'T:\SQLServer': 4096 bytes.*"
+        $output | Should -BeLike "*Physical sector size of the volume of '*Microsoft SQL Server': 8192 bytes.*"
     }
 
     It "installs with the default data folder when the virtual disk cannot be created" {
@@ -1303,8 +1481,9 @@ Describe "Install-SqlExpress.ps1" {
         $sql.VirtualDiskWorks = $false
         $output = & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -VirtualDiskPath (Join-Path $TestDrive 'sqldata.vhdx') 6>&1 | Out-String
         $output | Should -BeLike '*physical sector size of 8192 bytes*'
-        $output | Should -BeLike '*WARNING: The SQL Server data volume could not be created*'
+        $output | Should -BeLike '*WARNING: The SQL Server volume could not be created; installing with the default folders*'
         $sql.Processes[1] | Should -BeLike '* /ACTION=Install *'
+        $sql.Processes[1] | Should -Not -BeLike '*/INSTANCEDIR*'
         $sql.Processes[1] | Should -Not -BeLike '*/INSTALLSQLDATADIR*'
     }
 
@@ -1312,11 +1491,18 @@ Describe "Install-SqlExpress.ps1" {
         $sql.Sectors[$systemDrive] = 8192
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -DataDirectory 'E:\SqlData' 6>$null
         $sql.Processes[1] | Should -BeLike '* /INSTALLSQLDATADIR="E:\SqlData"'
+        $sql.Processes[1] | Should -Not -BeLike '*/INSTANCEDIR*'
         Should -Invoke diskpart -Times 0 -Exactly
+    }
+
+    It "passes an explicit instance directory to setup" {
+        & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -InstanceDirectory 'E:\SqlServer' 6>$null
+        $sql.Processes[1] | Should -BeLike '* /UPDATEENABLED=FALSE /INSTANCEDIR="E:\SqlServer"'
     }
 
     It "uninstalls a half-installed instance before retrying setup" {
         $sql.SucceedsOnRun = 2
+        $sql.ExitCodes[1] = -2061893607
         $sql.RegisteredAfterFailure = $true
         & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 6>$null
         $sql.SetupRuns | Should -Be 2
@@ -1327,8 +1513,16 @@ Describe "Install-SqlExpress.ps1" {
     It "fails after the last setup attempt when the service never runs" {
         $sql.SucceedsOnRun = 99
         { & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -SetupAttempts 2 6>$null } |
-            Should -Throw "*Installing SQL Server Express instance 'SQLEXPRESS' failed after 2 attempt(s) (last setup exit code -2061893607)*"
+            Should -Throw "*Installing SQL Server Express instance 'SQLEXPRESS' failed after 2 attempt(s) (last attempt: the service 'MSSQL`$SQLEXPRESS' does not run); see the setup diagnostics above."
         $sql.SetupRuns | Should -Be 2
+        $sql.Connects | Should -Be 0
+    }
+
+    It "reports setup's failing exit code when the service never runs" {
+        $sql.SucceedsOnRun = 99
+        $sql.ExitCodes[1] = -2061893607
+        { & $installSqlExpress -WorkFolder $workFolder -InstallerSha256 $installerSha256 -SetupAttempts 1 6>$null } |
+            Should -Throw "*(last attempt: setup exited with code -2061893607 (0x851A0019: Could not find the Database Engine startup handle)); see the setup diagnostics above."
     }
 
     It "retries the download and rejects an installer with the wrong hash" {

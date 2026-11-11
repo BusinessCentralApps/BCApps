@@ -38,9 +38,11 @@ ENV BCDEVENV_INSTANCE=BC
 # ---------------------------------------------------------------------------
 # 1. SQL Server Express (engine + Full-Text Search, which BC's text-optimized
 #    indexes need when a company is created), installed by Install-SqlExpress.ps1 from
-#    Microsoft's download: SHA256-checked and retried, success judged by the
-#    instance service starting (not by exit codes), a failed setup diagnosed,
-#    cleaned up and retried. The same script installs SQL on the CI runner. It
+#    Microsoft's download: SHA256-checked and retried. An attempt succeeds only
+#    when setup exits with 0 or 3010, the instance service runs and the engine
+#    answers SELECT 1 over shared memory; a failed attempt prints the setup
+#    summary, ERRORLOG, event log errors and file layout, and is cleaned up and
+#    retried. The same script installs SQL on the CI runner. It
 #    is copied on its own so this layer stays cached across contexts.
 # ---------------------------------------------------------------------------
 COPY Install-SqlExpress.ps1 C:/bcdevenv-setup/

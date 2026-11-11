@@ -1915,11 +1915,55 @@ function Get-BcDevEnvSqlDataRoot {
 
 <#
 .SYNOPSIS
+    Whether a local SQL Server instance serves: SELECT 1 over shared memory with the current Windows
+    identity, retried; a rejected login also counts, since the engine answered it.
+#>
+function Test-BcDevEnvSqlConnection {
+    param(
+        [string] $Instance = 'SQLEXPRESS',
+        [ValidateRange(1, 100)] [int] $Attempts = 9,
+        [ValidateRange(0, 60)] [int] $DelaySeconds = 5
+    )
+
+    $server = if ($Instance -eq 'MSSQLSERVER') { 'lpc:.' } else { "lpc:.\$Instance" }
+    $lastError = ''
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $connection = $null
+        try {
+            $connection = New-Object -TypeName System.Data.SqlClient.SqlConnection -ArgumentList "Data Source=$server;Integrated Security=True;Pooling=False;Connect Timeout=5"
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'SELECT 1'
+            [void] $command.ExecuteScalar()
+            return $true
+        }
+        catch {
+            $number = 0
+            $lastError = $_.Exception.Message
+            for ($exception = $_.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+                $lastError = $exception.Message
+                if ($exception.GetType().Name -eq 'SqlException') { $number = $exception.Number; break }
+            }
+            if (@(18456, 18452, 4060) -contains $number) { return $true }
+        }
+        finally {
+            if ($null -ne $connection) { $connection.Dispose() }
+        }
+        if ($attempt -lt $Attempts) { Start-Sleep -Seconds $DelaySeconds }
+    }
+    Write-Host "SQL Server 'localhost\$Instance' does not accept a connection ($Attempts attempt(s)): $lastError"
+    return $false
+}
+
+<#
+.SYNOPSIS
     Makes a local SQL Server Express instance available for bcdevenv create-env on a CI runner and
     points BCDEVENV_HOME at a folder the SQL service account can back up to.
 .DESCRIPTION
-    Returns the data home that is used. SQL Server cannot use files on a volume whose physical sector
-    size is above 4 KB; on such a runner Install-SqlExpress.ps1 puts the instance's data files on a
+    Returns the data home that is used. The instance must accept a connection (Test-BcDevEnvSqlConnection)
+    after its network protocols are enabled, otherwise this fails with the instance's diagnostics
+    (Install-SqlExpress.ps1 -DiagnosticsOnly). SQL Server cannot use files on a volume whose physical sector
+    size is above 4 KB; on such a runner Install-SqlExpress.ps1 puts the instance and its data files on a
     4 KB virtual disk, and the data home (where SQL Server writes the empty database's backup) is
     moved to the same volume, keeping its path below the drive root.
 #>
@@ -1949,6 +1993,7 @@ function Initialize-BcDevEnvSqlServer {
         Start-Service -Name 'SQLBrowser'
     }
 
+    $restartError = ''
     try {
         $namespace = Get-CimInstance -Namespace 'ROOT\Microsoft\SqlServer' -ClassName '__NAMESPACE' -ErrorAction Stop |
             Where-Object { $_.Name -like 'ComputerManagement*' } |
@@ -1966,13 +2011,29 @@ function Initialize-BcDevEnvSqlServer {
                 }
             }
             if ($changed) {
-                Restart-Service -Name $serviceName -Force
+                # A failed restart leaves the instance down; it is reported below, not as a protocol problem.
+                try { Restart-Service -Name $serviceName -Force -ErrorAction Stop }
+                catch { $restartError = $_.Exception.Message }
                 if ($browser) { Restart-Service -Name 'SQLBrowser' -Force }
             }
         }
     }
     catch {
         Write-Warning "Could not enable the SQL network protocols: $($_.Exception.Message). Shared memory connections may still work."
+    }
+
+    # The service can report Running and still not serve (e.g. after a failed engine configuration),
+    # and create-env would only fail later with a connection error; check it here.
+    if (-not (Test-BcDevEnvSqlConnection -Instance $Instance)) {
+        $reason = if ($restartError) { "restarting its service after enabling the network protocols failed: $restartError" } else { 'it does not accept a shared-memory connection' }
+        if ($InstallScript -and (Test-Path -LiteralPath $InstallScript -PathType Leaf)) {
+            try { & $InstallScript -InstanceName $Instance -DiagnosticsOnly | ForEach-Object { Write-Host $_ } }
+            catch { Write-Warning "Collecting the SQL Server diagnostics failed: $($_.Exception.Message)" }
+        }
+        throw "SQL Server 'localhost\$Instance' is not usable: $reason. See the SQL Server diagnostics above."
+    }
+    if ($restartError) {
+        Write-Warning "Restarting the SQL Server service '$serviceName' after enabling the network protocols failed ($restartError), but the instance accepts connections."
     }
 
     $homeSectorSize = Get-BcDevEnvVolumeSectorSize -Path $DataHome

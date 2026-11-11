@@ -302,12 +302,17 @@ build mode it:
    image build), builds this CLI (`dotnet build`), prepares a local SQL Server
    Express (`container\Install-SqlExpress.ps1`, also used by the image: Microsoft's
    SHA256-checked Express with Advanced Services download (engine + Full-Text Search)
-   instead of the Chocolatey feed, setup retried and verified
-   by the instance service starting; on runners whose system disk reports a physical
-   sector size above 4 KB, which SQL Server cannot use, the instance's data files and
-   the environment folder (`BCDEVENV_HOME`) go to an expandable VHDX volume with 4 KB
-   sectors instead, because the `ForcedPhysicalSectorSizeInBytes` registry workaround
-   needs a reboot), downloads the **platform-only** artifact of the
+   instead of the Chocolatey feed, setup retried; an attempt succeeds only when setup
+   exits with 0 or 3010, the instance service runs **and** the engine answers
+   `SELECT 1` over shared memory, and every failed attempt prints the setup summary,
+   the instance's ERRORLOG, its SQL Server event log errors, its file layout and the
+   volumes' sector sizes; the runner's instance must still accept a connection after
+   its network protocols are enabled. On runners whose system disk reports a physical
+   sector size above 4 KB, which SQL Server cannot use, the instance (`/INSTANCEDIR`,
+   including the Resource database), its data files and the environment folder
+   (`BCDEVENV_HOME`) go to an expandable VHDX volume with 4 KB sectors instead, because
+   the `ForcedPhysicalSectorSizeInBytes` registry workaround needs a reboot; when setup
+   still fails there, the error says that this workaround was active), downloads the **platform-only** artifact of the
    `BCPlatform` version in `build\Packages.json` (with retries; a truncated or
    invalid zip is deleted and downloaded again) and compiles the test runner app
    with that platform's AL compiler;
@@ -497,9 +502,15 @@ Caveats:
   (Microsoft's `SQLEXPRADV_x64_ENU.exe`, Express with Advanced Services, pinned by
   SHA256, features `SQLENGINE,FULLTEXT`: BC creates full-text indexes when a company
   is created); update its URL and hash together when moving to another SQL Server
-  Express release. Its sector-size mitigation (a VHDX data volume when the system
-  disk reports physical sectors above 4 KB) needs `diskpart`; where it cannot create
-  the virtual disk (e.g. inside a container) setup uses the default data folder.
+  Express release. Its sector-size mitigation (a VHDX volume for the instance and its
+  data files when the system disk reports physical sectors above 4 KB) needs
+  `diskpart`; where it cannot create the virtual disk (e.g. inside a container) setup
+  uses the default folders. A setup exit code other than 0/3010 fails the attempt even
+  when the service appears to run (setup's 0x851A001A, "Wait on the Database Engine
+  recovery handle failed", can leave a service that runs briefly and then fails to
+  restart). `Install-SqlExpress.ps1 -DiagnosticsOnly` prints an instance's diagnostics
+  without installing anything; the pipeline runs it when the instance does not accept
+  a connection.
 - Registering an NST from baked binaries on a plain Windows base image may need
   manual service setup, since `New-NAVServerInstance` normally expects the
   product installed.
