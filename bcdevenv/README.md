@@ -635,10 +635,25 @@ runner. Known cases, from the CI failures (cause not verified for each test):
   but one that a codeunit with `RequiredTestIsolation = Disabled` commits stays for the
   later codeunits; the reset cannot clear it;
 - without `OnTestInitialize` there is no per-method seed (see above): the Sustainability
-  tests 148184, 148186, 148187, 148190 and 148206 fail in ways that look
+  tests 148184, 148186, 148187, 148190 and 148206, and 139882 (`APIV2 - Salesperson/Purch
+  E2E`, a `RandDec` commission of "4.80" read back as "4.8"), fail in ways that look
   seed-dependent;
-- 139624 and 139657 fail with `asserterror` raising no error; no cause in the runner has
-  been found.
+- 139624, 139657 and 135033 (`Password Dialog Test`, the `OK` of the change-password
+  dialog in a modal page handler) fail with `asserterror` raising no error, and 134685
+  (`Email Test.FailedAttachFromRelatedRecords`) reaches its page handler, which fails
+  with "Queue underflow", where the test expects an error first; no cause in the runner
+  has been found.
+
+The container's client services use Windows authentication, while AL-Go's
+`Run-AlPipeline` uses `NavUserPassword` by default. `User Permissions
+Library.CreateSuperUser` (System Application Test Library) gives an on-premises user
+the Windows account `SID()`, which under Windows authentication is the account of the
+user that runs the tests, so 132925 (`Plan Configuration
+E2E Test.CustomizePermissionSetAdd`) fails with "The same Windows Account can be
+connected to only one Business Central user." It passed before the reset cleared
+the Environment Info testability flags, because an earlier codeunit had left
+`SetTestabilitySoftwareAsAService(true)` set and the library skips the Windows account
+on SaaS.
 
 A generic fix for single-instance state would be one AL tool invocation per test
 codeunit, so that every codeunit gets a new session. It is not implemented: every
