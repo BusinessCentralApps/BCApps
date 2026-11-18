@@ -674,125 +674,97 @@ Describe "RunBcDevEnvPipeline action contract" {
     }
 }
 
-Describe "Set-BcDevEnvRunnerPermissionsMock" {
+Describe "Set-BcDevEnvRunner* (optional runner parts)" {
+    BeforeAll {
+        $partSource = Join-Path $PSScriptRoot '../../../bcdevenv/testrunner-optional'
+        $mockId = '40860557-a18d-42ad-aecb-22b7dd80dc80'
+        $libraryId = 'd852d5d2-a39d-4179-baeb-f99a19e32510'
+        $systemLibraryId = '9856ae4f-d1a7-46ef-89bb-6ef056398228'
+        function Get-RunnerJson { Get-Content -LiteralPath (Join-Path $runnerSource 'app.json') -Raw | ConvertFrom-Json }
+        function Get-RunnerParts {
+            $optional = Join-Path $runnerSource 'optional'
+            if (-not (Test-Path -LiteralPath $optional)) { return @() }
+            return @(Get-ChildItem -LiteralPath $optional -Directory | Sort-Object Name | ForEach-Object Name)
+        }
+    }
+
     BeforeEach {
-        $appJson = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner/app.json') -Destination $appJson
-        $original = Get-Content -LiteralPath $appJson -Raw
-        $mock = New-ManifestObject -Id '40860557-a18d-42ad-aecb-22b7dd80dc80' -Name 'Permissions Mock' -Version '30.0.1.2'
+        $runnerSource = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner') -Destination $runnerSource -Recurse
+        $original = Get-Content -LiteralPath (Join-Path $runnerSource 'app.json') -Raw
+        $before = @((Get-RunnerJson).dependencies)
+        $mock = New-ManifestObject -Id $mockId -Name 'Permissions Mock' -Version '30.0.1.2'
+        $library = New-ManifestObject -Id $libraryId -Name 'Application Test Library' -Version '30.0.3.4'
+        $systemLibrary = New-ManifestObject -Id $systemLibraryId -Name 'System Application Test Library' -Version '30.0.5.6'
         $other = New-ManifestObject -Id '11111111-1111-1111-1111-111111111111' -Name 'Other'
     }
 
-    It "leaves app.json unchanged when Permissions Mock is not installed" {
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other) | Should -BeNullOrEmpty
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @() | Should -BeNullOrEmpty
-        Get-Content -LiteralPath $appJson -Raw | Should -Be $original
-        (Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).PSObject.Properties['preprocessorSymbols'] | Should -BeNullOrEmpty
+    It "leaves the runner source unchanged when none of the libraries is installed" {
+        foreach ($apps in @(@($other), @())) {
+            Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Should -BeNullOrEmpty
+            Set-BcDevEnvRunnerApplicationTestLibrary -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Should -BeNullOrEmpty
+            Set-BcDevEnvRunnerSystemApplicationTestLibrary -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Should -BeNullOrEmpty
+        }
+        Get-Content -LiteralPath (Join-Path $runnerSource 'app.json') -Raw | Should -Be $original
+        Test-Path -LiteralPath (Join-Path $runnerSource 'optional') | Should -BeFalse
     }
 
-    It "adds the dependency and the BCDEVENV_PERMISSIONSMOCK symbol once, keeping the other dependencies" {
-        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
-        (Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other, $mock)).Name | Should -Be 'Permissions Mock'
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($mock) | Out-Null
-        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
-        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_PERMISSIONSMOCK')
+    It "copies the part of each installed library and adds its dependency once, keeping the other dependencies" -TestCases @(
+        @{ Function = 'Set-BcDevEnvRunnerPermissionsMock'; Part = 'PermissionsMock'; File = 'BcDevEnvPermMockReset.Codeunit.al'; Id = '40860557-a18d-42ad-aecb-22b7dd80dc80'; Name = 'Permissions Mock'; Version = '30.0.1.2' }
+        @{ Function = 'Set-BcDevEnvRunnerApplicationTestLibrary'; Part = 'ApplicationTestLibrary'; File = 'BcDevEnvTestMethodReset.Codeunit.al'; Id = 'd852d5d2-a39d-4179-baeb-f99a19e32510'; Name = 'Application Test Library'; Version = '30.0.3.4' }
+        @{ Function = 'Set-BcDevEnvRunnerSystemApplicationTestLibrary'; Part = 'SystemApplicationTestLibrary'; File = 'BcDevEnvSysAppLibReset.Codeunit.al'; Id = '9856ae4f-d1a7-46ef-89bb-6ef056398228'; Name = 'System Application Test Library'; Version = '30.0.5.6' }
+    ) {
+        param($Function, $Part, $File, $Id, $Name, $Version)
+        $apps = @($other, $mock, $library, $systemLibrary)
+        (& $Function -RunnerSource $runnerSource -PartSource $partSource -Apps $apps).Name | Should -Be $Name
+        & $Function -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Out-Null
+        Get-RunnerParts | Should -Be @($Part)
+        Get-Content -LiteralPath (Join-Path $runnerSource "optional/$Part/$File") -Raw | Should -Be (Get-Content -LiteralPath (Join-Path $partSource "$Part/$File") -Raw)
+        @(Get-ChildItem -LiteralPath (Join-Path $runnerSource "optional/$Part") -Recurse -File).Count | Should -Be @(Get-ChildItem -LiteralPath (Join-Path $partSource $Part) -Recurse -File).Count
+        $json = Get-RunnerJson
+        $json.PSObject.Properties['preprocessorSymbols'] | Should -BeNullOrEmpty
         $dependencies = @($json.dependencies)
         $dependencies.Count | Should -Be ($before.Count + 1)
         foreach ($dependency in $before) { @($dependencies.id) | Should -Contain $dependency.id }
-        $added = @($dependencies | Where-Object { $_.id -eq '40860557-a18d-42ad-aecb-22b7dd80dc80' })
+        $added = @($dependencies | Where-Object { $_.id -eq $Id })
         $added.Count | Should -Be 1
-        $added[0].name | Should -Be 'Permissions Mock'
+        $added[0].name | Should -Be $Name
         $added[0].publisher | Should -Be 'Microsoft'
-        $added[0].version | Should -Be '30.0.1.2'
+        $added[0].version | Should -Be $Version
     }
 
-    It "replaces an existing Permissions Mock dependency with the installed version" {
-        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
-        $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue @([pscustomobject]@{ id = '40860557-a18d-42ad-aecb-22b7dd80dc80'; name = 'Permissions Mock'; publisher = 'Microsoft'; version = '1.0.0.0' }) -Force
-        Set-Content -LiteralPath $appJson -Value ($json | ConvertTo-Json -Depth 10)
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($mock) | Out-Null
-        $dependencies = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
+    It "adds only the parts of the installed libraries" {
+        Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource $partSource -Apps @($other, $library) | Should -BeNullOrEmpty
+        (Set-BcDevEnvRunnerApplicationTestLibrary -RunnerSource $runnerSource -PartSource $partSource -Apps @($other, $library)).Name | Should -Be 'Application Test Library'
+        Set-BcDevEnvRunnerSystemApplicationTestLibrary -RunnerSource $runnerSource -PartSource $partSource -Apps @($other, $library) | Should -BeNullOrEmpty
+        Get-RunnerParts | Should -Be @('ApplicationTestLibrary')
+        $dependencies = @((Get-RunnerJson).dependencies)
+        $dependencies.Count | Should -Be ($before.Count + 1)
+        @($dependencies | Where-Object { $_.id -in @($mockId, $systemLibraryId) }).Count | Should -Be 0
+
+        $apps = @($mock, $library, $systemLibrary)
+        Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Out-Null
+        Set-BcDevEnvRunnerSystemApplicationTestLibrary -RunnerSource $runnerSource -PartSource $partSource -Apps $apps | Out-Null
+        Get-RunnerParts | Should -Be @('ApplicationTestLibrary', 'PermissionsMock', 'SystemApplicationTestLibrary')
+        @((Get-RunnerJson).dependencies).Count | Should -Be ($before.Count + 3)
+    }
+
+    It "replaces an existing dependency with the installed version and an earlier copy of the part" {
+        $json = Get-RunnerJson
+        $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue @([pscustomobject]@{ id = $mockId; name = 'Permissions Mock'; publisher = 'Microsoft'; version = '1.0.0.0' }) -Force
+        Set-Content -LiteralPath (Join-Path $runnerSource 'app.json') -Value ($json | ConvertTo-Json -Depth 10)
+        New-Item -ItemType Directory -Path (Join-Path $runnerSource 'optional/PermissionsMock') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $runnerSource 'optional/PermissionsMock/Stale.Codeunit.al') -Value '// stale'
+        Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource $partSource -Apps @($mock) | Out-Null
+        $dependencies = @((Get-RunnerJson).dependencies)
         $dependencies.Count | Should -Be 1
         $dependencies[0].version | Should -Be '30.0.1.2'
-    }
-}
-
-Describe "Set-BcDevEnvRunnerApplicationTestLibrary" {
-    BeforeEach {
-        $appJson = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner/app.json') -Destination $appJson
-        $original = Get-Content -LiteralPath $appJson -Raw
-        $mock = New-ManifestObject -Id '40860557-a18d-42ad-aecb-22b7dd80dc80' -Name 'Permissions Mock' -Version '30.0.1.2'
-        $library = New-ManifestObject -Id 'd852d5d2-a39d-4179-baeb-f99a19e32510' -Name 'Application Test Library' -Version '30.0.3.4'
-        $other = New-ManifestObject -Id '11111111-1111-1111-1111-111111111111' -Name 'Other'
+        Test-Path -LiteralPath (Join-Path $runnerSource 'optional/PermissionsMock/Stale.Codeunit.al') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $runnerSource 'optional/PermissionsMock/BcDevEnvPermMockReset.Codeunit.al') | Should -BeTrue
     }
 
-    It "leaves app.json unchanged without Application Test Library" {
-        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $mock) | Should -BeNullOrEmpty
-        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @() | Should -BeNullOrEmpty
-        Get-Content -LiteralPath $appJson -Raw | Should -Be $original
-    }
-
-    It "adds the dependency and the BCDEVENV_APPTESTLIB symbol without Permissions Mock" {
-        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other, $library) | Should -BeNullOrEmpty
-        (Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library)).Name | Should -Be 'Application Test Library'
-        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
-        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_APPTESTLIB')
-        @($json.dependencies).Count | Should -Be ($before.Count + 1)
-        @($json.dependencies | Where-Object { $_.id -eq '40860557-a18d-42ad-aecb-22b7dd80dc80' }).Count | Should -Be 0
-    }
-
-    It "adds the dependency and the BCDEVENV_APPTESTLIB symbol once, next to the Permissions Mock ones" {
-        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
-        Set-BcDevEnvRunnerPermissionsMock -AppJsonPath $appJson -Apps @($other, $library, $mock) | Out-Null
-        (Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library, $mock)).Name | Should -Be 'Application Test Library'
-        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($library, $mock) | Out-Null
-        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
-        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_PERMISSIONSMOCK', 'BCDEVENV_APPTESTLIB')
-        $dependencies = @($json.dependencies)
-        $dependencies.Count | Should -Be ($before.Count + 2)
-        foreach ($dependency in $before) { @($dependencies.id) | Should -Contain $dependency.id }
-        @($dependencies | Where-Object { $_.id -eq '40860557-a18d-42ad-aecb-22b7dd80dc80' }).Count | Should -Be 1
-        $added = @($dependencies | Where-Object { $_.id -eq 'd852d5d2-a39d-4179-baeb-f99a19e32510' })
-        $added.Count | Should -Be 1
-        $added[0].name | Should -Be 'Application Test Library'
-        $added[0].publisher | Should -Be 'Microsoft'
-        $added[0].version | Should -Be '30.0.3.4'
-    }
-}
-
-Describe "Set-BcDevEnvRunnerSystemApplicationTestLibrary" {
-    BeforeEach {
-        $appJson = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../../bcdevenv/testrunner/app.json') -Destination $appJson
-        $original = Get-Content -LiteralPath $appJson -Raw
-        $applicationLibrary = New-ManifestObject -Id 'd852d5d2-a39d-4179-baeb-f99a19e32510' -Name 'Application Test Library' -Version '30.0.3.4'
-        $library = New-ManifestObject -Id '9856ae4f-d1a7-46ef-89bb-6ef056398228' -Name 'System Application Test Library' -Version '30.0.5.6'
-        $other = New-ManifestObject -Id '11111111-1111-1111-1111-111111111111' -Name 'Other'
-    }
-
-    It "leaves app.json unchanged without System Application Test Library" {
-        Set-BcDevEnvRunnerSystemApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $applicationLibrary) | Should -BeNullOrEmpty
-        Set-BcDevEnvRunnerSystemApplicationTestLibrary -AppJsonPath $appJson -Apps @() | Should -BeNullOrEmpty
-        Get-Content -LiteralPath $appJson -Raw | Should -Be $original
-    }
-
-    It "adds the dependency and the BCDEVENV_SYSAPPTESTLIB symbol once, next to the other ones" {
-        $before = @((Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json).dependencies)
-        Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library, $applicationLibrary) | Out-Null
-        (Set-BcDevEnvRunnerSystemApplicationTestLibrary -AppJsonPath $appJson -Apps @($other, $library, $applicationLibrary)).Name | Should -Be 'System Application Test Library'
-        Set-BcDevEnvRunnerSystemApplicationTestLibrary -AppJsonPath $appJson -Apps @($library) | Out-Null
-        $json = Get-Content -LiteralPath $appJson -Raw | ConvertFrom-Json
-        @($json.preprocessorSymbols) | Should -Be @('BCDEVENV_APPTESTLIB', 'BCDEVENV_SYSAPPTESTLIB')
-        $dependencies = @($json.dependencies)
-        $dependencies.Count | Should -Be ($before.Count + 2)
-        foreach ($dependency in $before) { @($dependencies.id) | Should -Contain $dependency.id }
-        $added = @($dependencies | Where-Object { $_.id -eq '9856ae4f-d1a7-46ef-89bb-6ef056398228' })
-        $added.Count | Should -Be 1
-        $added[0].name | Should -Be 'System Application Test Library'
-        $added[0].publisher | Should -Be 'Microsoft'
-        $added[0].version | Should -Be '30.0.5.6'
+    It "fails when the part folder is missing" {
+        { Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource (Join-Path $TestDrive 'no-parts') -Apps @($mock) } | Should -Throw "*part 'PermissionsMock' was not found*"
     }
 }
 

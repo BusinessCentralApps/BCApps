@@ -10,9 +10,6 @@
 namespace BcDevEnv.TestRunner;
 
 using System.Reflection;
-#if BCDEVENV_PERMISSIONSMOCK
-using System.TestLibraries.Security.AccessControl;
-#endif
 
 codeunit 50105 "BcDevEnv State Probe"
 {
@@ -134,45 +131,49 @@ codeunit 50105 "BcDevEnv State Probe"
         exit(StrSubstNo('%1 row(s)%2', RowCount, Rows.ToText()));
     end;
 
-#if BCDEVENV_PERMISSIONSMOCK
+    // The Permissions Mock part (codeunit 50111) reports the state; without it, Permissions Mock is not installed.
     local procedure PermissionsMockState(): Text
     var
-        PermissionsMock: Codeunit "Permissions Mock";
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        Started: Boolean;
     begin
-        if PermissionsMock.IsStarted() then
+        if not TestStateReset.GetPermissionsMockState(Started) then
+            exit('n/a (Permissions Mock not installed)');
+        if Started then
             exit('started');
         exit('stopped');
     end;
-#else
-    local procedure PermissionsMockState(): Text
-    begin
-        exit('n/a (Permissions Mock not installed)');
-    end;
-#endif
 
-    // Whether codeunit 50110 (the per-method reset on Library - Test Initialize's OnTestInitialize) is compiled, and with
-    // the restart of a stopped permissions mock.
+    // Whether the Application Test Library part (codeunit 50110, the per-method reset on Library - Test Initialize's
+    // OnTestInitialize) is compiled, and with the Permissions Mock part, which restarts a stopped permissions mock.
     local procedure MethodResetState(): Text
+    var
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        PermissionsMockPart: Boolean;
+        ApplicationTestLibraryPart: Boolean;
+        SystemApplicationTestLibraryPart: Boolean;
     begin
-#if BCDEVENV_APPTESTLIB
-#if BCDEVENV_PERMISSIONSMOCK
-        exit('compiled (last error, seed, notification context, stopped mock restart)');
-#else
+        TestStateReset.GetCompiledParts(PermissionsMockPart, ApplicationTestLibraryPart, SystemApplicationTestLibraryPart);
+        if not ApplicationTestLibraryPart then
+            exit('not compiled (Application Test Library not installed)');
+        if PermissionsMockPart then
+            exit('compiled (last error, seed, notification context, stopped mock restart)');
         exit('compiled (last error, seed, notification context; no mock restart: Permissions Mock not installed)');
-#endif
-#else
-        exit('not compiled (Application Test Library not installed)');
-#endif
     end;
 
-    // Whether the state reset (50102) resets the single-instance state of System Application Test Library.
+    // Whether the System Application Test Library part (codeunit 50112) is compiled, which resets the single-instance
+    // state of System Application Test Library in the state reset (50102).
     local procedure SystemApplicationTestLibraryResetState(): Text
+    var
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        PermissionsMockPart: Boolean;
+        ApplicationTestLibraryPart: Boolean;
+        SystemApplicationTestLibraryPart: Boolean;
     begin
-#if BCDEVENV_SYSAPPTESTLIB
-        exit('compiled');
-#else
+        TestStateReset.GetCompiledParts(PermissionsMockPart, ApplicationTestLibraryPart, SystemApplicationTestLibraryPart);
+        if SystemApplicationTestLibraryPart then
+            exit('compiled');
         exit('not compiled (System Application Test Library not installed)');
-#endif
     end;
 
     local procedure SingleLine(Value: Text): Text

@@ -41,20 +41,22 @@ $script:AlToolPackageId = 'microsoft.dynamics.businesscentral.development.tools'
 $script:DefaultAlToolVersion = '30.0.44.47290-beta'
 $script:DefaultAppTestTimeoutMinutes = 240
 # Permissions Mock (src/Tools/Test Framework/Test Libraries/Permissions Mock). When it is installed, the
-# BcDevEnv Test Runner is compiled against it so its state reset can start and stop the mock.
+# BcDevEnv Test Runner is compiled with its Permissions Mock part (bcdevenv/testrunner-optional/PermissionsMock),
+# against Permissions Mock, so its state reset can start and stop the mock.
 $script:PermissionsMockAppId = '40860557-a18d-42ad-aecb-22b7dd80dc80'
-$script:PermissionsMockSymbol = 'BCDEVENV_PERMISSIONSMOCK'
+$script:PermissionsMockPart = 'PermissionsMock'
 # Application Test Library (src/Layers/W1/Tests/ApplicationTestLibrary). When it is installed, the runner is
-# also compiled against it, so it can reset every test method that raises "Library - Test Initialize".
-# OnTestInitialize (last error, random seed, notification context) and, with Permissions Mock, restart a
-# stopped permissions mock there.
+# also compiled with its Application Test Library part, against that library, so it can reset every test method
+# that raises "Library - Test Initialize".OnTestInitialize (last error, random seed, notification context) and,
+# with the Permissions Mock part, restart a stopped permissions mock there.
 $script:ApplicationTestLibraryAppId = 'd852d5d2-a39d-4179-baeb-f99a19e32510'
-$script:ApplicationTestLibrarySymbol = 'BCDEVENV_APPTESTLIB'
-# System Application Test Library (src/System Application/Test Library). When it is installed, the runner's
-# state reset also turns off the testability flags of "Environment Info Test Library" and clears the secrets
-# of "Azure Key Vault Test Library" before every test codeunit.
+$script:ApplicationTestLibraryPart = 'ApplicationTestLibrary'
+# System Application Test Library (src/System Application/Test Library). When it is installed, the runner is
+# also compiled with its System Application Test Library part, whose step of the state reset turns off the
+# testability flags of "Environment Info Test Library" and clears the secrets of "Azure Key Vault Test Library"
+# before every test codeunit.
 $script:SystemApplicationTestLibraryAppId = '9856ae4f-d1a7-46ef-89bb-6ef056398228'
-$script:SystemApplicationTestLibrarySymbol = 'BCDEVENV_SYSAPPTESTLIB'
+$script:SystemApplicationTestLibraryPart = 'SystemApplicationTestLibrary'
 # Source of t2embed.dll (font embedding, needed to render reports as PDF), which Windows Server Core
 # lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
 # $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
@@ -1680,81 +1682,98 @@ function Get-BcDevEnvRunTestsArguments {
 
 <#
 .SYNOPSIS
-    When Permissions Mock is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy of the
-    BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
-    BCDEVENV_PERMISSIONSMOCK, which enables the permissions mock part of the runner's state reset.
-    Returns the Permissions Mock app, or $null (app.json unchanged) when it is not installed. Idempotent.
+    When Permissions Mock is in the install set (-Apps, Get-BcDevEnvAppInfo objects), adds the Permissions Mock part
+    of the BcDevEnv Test Runner (-PartSource\PermissionsMock, codeunit 50111: the permissions mock steps of the
+    state reset) to a copy of the runner's source (-RunnerSource) and the dependency on Permissions Mock to its
+    app.json. Returns the Permissions Mock app, or $null (source unchanged) when it is not installed. Idempotent.
 #>
 function Set-BcDevEnvRunnerPermissionsMock {
     param(
-        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [Parameter(Mandatory = $true)] [string] $RunnerSource,
+        [Parameter(Mandatory = $true)] [string] $PartSource,
         [AllowEmptyCollection()] [object[]] $Apps = @()
     )
 
     $mockApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:PermissionsMockAppId }) | Select-Object -First 1
     if ($null -eq $mockApp) { return $null }
 
-    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $mockApp -Symbol $script:PermissionsMockSymbol
+    Add-BcDevEnvRunnerPart -RunnerSource $RunnerSource -PartSource $PartSource -Part $script:PermissionsMockPart -App $mockApp
     return $mockApp
 }
 
 <#
 .SYNOPSIS
-    When Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy of the
-    BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
-    BCDEVENV_APPTESTLIB, which compiles the runner's per-method reset on "Library - Test Initialize".OnTestInitialize
-    (last error, random seed 1, temporary notification context; with BCDEVENV_PERMISSIONSMOCK, see
-    Set-BcDevEnvRunnerPermissionsMock, also the restart of a stopped permissions mock). Returns the Application Test
-    Library app, or $null (app.json unchanged) when it is not installed. Idempotent.
+    When Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), adds the Application
+    Test Library part of the BcDevEnv Test Runner (-PartSource\ApplicationTestLibrary, codeunit 50110: the
+    per-method reset on "Library - Test Initialize".OnTestInitialize, which clears the last error, sets the random
+    seed 1, clears the temporary notification context and, with the Permissions Mock part, see
+    Set-BcDevEnvRunnerPermissionsMock, restarts a stopped permissions mock) to a copy of the runner's source
+    (-RunnerSource) and the dependency on Application Test Library to its app.json. Returns the Application Test
+    Library app, or $null (source unchanged) when it is not installed. Idempotent.
 #>
 function Set-BcDevEnvRunnerApplicationTestLibrary {
     param(
-        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [Parameter(Mandatory = $true)] [string] $RunnerSource,
+        [Parameter(Mandatory = $true)] [string] $PartSource,
         [AllowEmptyCollection()] [object[]] $Apps = @()
     )
 
     $libraryApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:ApplicationTestLibraryAppId }) | Select-Object -First 1
     if ($null -eq $libraryApp) { return $null }
 
-    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $libraryApp -Symbol $script:ApplicationTestLibrarySymbol
+    Add-BcDevEnvRunnerPart -RunnerSource $RunnerSource -PartSource $PartSource -Part $script:ApplicationTestLibraryPart -App $libraryApp
     return $libraryApp
 }
 
 <#
 .SYNOPSIS
-    When System Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), makes a copy
-    of the BcDevEnv Test Runner's app.json compile against it: adds the dependency and the preprocessor symbol
-    BCDEVENV_SYSAPPTESTLIB, which compiles the state reset's reset of that library's single-instance state (the
-    testability flags of "Environment Info Test Library", the secrets of "Azure Key Vault Test Library"). Returns
-    the System Application Test Library app, or $null (app.json unchanged) when it is not installed. Idempotent.
+    When System Application Test Library is in the install set (-Apps, Get-BcDevEnvAppInfo objects), adds the
+    System Application Test Library part of the BcDevEnv Test Runner (-PartSource\SystemApplicationTestLibrary,
+    codeunit 50112: the step of the state reset that resets that library's single-instance state, the testability
+    flags of "Environment Info Test Library" and the secrets of "Azure Key Vault Test Library") to a copy of the
+    runner's source (-RunnerSource) and the dependency on System Application Test Library to its app.json. Returns
+    the System Application Test Library app, or $null (source unchanged) when it is not installed. Idempotent.
 #>
 function Set-BcDevEnvRunnerSystemApplicationTestLibrary {
     param(
-        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
+        [Parameter(Mandatory = $true)] [string] $RunnerSource,
+        [Parameter(Mandatory = $true)] [string] $PartSource,
         [AllowEmptyCollection()] [object[]] $Apps = @()
     )
 
     $libraryApp = @($Apps | Where-Object { $null -ne $_ -and [string]$_.Id -eq $script:SystemApplicationTestLibraryAppId }) | Select-Object -First 1
     if ($null -eq $libraryApp) { return $null }
 
-    Add-BcDevEnvRunnerAppDependency -AppJsonPath $AppJsonPath -App $libraryApp -Symbol $script:SystemApplicationTestLibrarySymbol
+    Add-BcDevEnvRunnerPart -RunnerSource $RunnerSource -PartSource $PartSource -Part $script:SystemApplicationTestLibraryPart -App $libraryApp
     return $libraryApp
 }
 
 <#
 .SYNOPSIS
-    Adds a dependency on -App (a Get-BcDevEnvAppInfo object; replaces an existing one with the same id) and the
-    preprocessor symbol -Symbol (once) to the app.json at -AppJsonPath, keeping the other entries.
+    Copies the optional runner part -PartSource\-Part (a folder of bcdevenv/testrunner-optional) to
+    -RunnerSource\optional\-Part, replacing an earlier copy, and adds a dependency on -App (a Get-BcDevEnvAppInfo
+    object; replaces an existing one with the same id) to -RunnerSource\app.json, keeping the other entries. The AL
+    compiler compiles every .al file under the project folder, so the part is compiled in only after this.
 #>
-function Add-BcDevEnvRunnerAppDependency {
+function Add-BcDevEnvRunnerPart {
     param(
-        [Parameter(Mandatory = $true)] [string] $AppJsonPath,
-        [Parameter(Mandatory = $true)] [object] $App,
-        [Parameter(Mandatory = $true)] [string] $Symbol
+        [Parameter(Mandatory = $true)] [string] $RunnerSource,
+        [Parameter(Mandatory = $true)] [string] $PartSource,
+        [Parameter(Mandatory = $true)] [string] $Part,
+        [Parameter(Mandatory = $true)] [object] $App
     )
 
+    $source = Join-Path $PartSource $Part
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "The BcDevEnv Test Runner part '$Part' was not found at '$source'." }
+    $optional = Join-Path $RunnerSource 'optional'
+    $target = Join-Path $optional $Part
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+    New-Item -ItemType Directory -Path $optional -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $target -Recurse
+
+    $appJsonPath = Join-Path $RunnerSource 'app.json'
     $appId = [string]$App.Id
-    $json = Get-Content -LiteralPath $AppJsonPath -Raw | ConvertFrom-Json
+    $json = Get-Content -LiteralPath $appJsonPath -Raw | ConvertFrom-Json
     $dependencies = @()
     if ($json.PSObject.Properties['dependencies'] -and $null -ne $json.dependencies) {
         $dependencies = @($json.dependencies | Where-Object { [string]$_.id -ne $appId })
@@ -1767,12 +1786,7 @@ function Add-BcDevEnvRunnerAppDependency {
     }
     $json | Add-Member -NotePropertyName 'dependencies' -NotePropertyValue $dependencies -Force
 
-    $symbols = @()
-    if ($json.PSObject.Properties['preprocessorSymbols'] -and $null -ne $json.preprocessorSymbols) { $symbols = @($json.preprocessorSymbols) }
-    if ($symbols -notcontains $Symbol) { $symbols += $Symbol }
-    $json | Add-Member -NotePropertyName 'preprocessorSymbols' -NotePropertyValue $symbols -Force
-
-    Set-Content -LiteralPath $AppJsonPath -Value ($json | ConvertTo-Json -Depth 10) -Encoding UTF8
+    Set-Content -LiteralPath $appJsonPath -Value ($json | ConvertTo-Json -Depth 10) -Encoding UTF8
 }
 
 function Get-BcDevEnvJUnitCounts {

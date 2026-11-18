@@ -5,7 +5,8 @@
 > `16e2402765a5a1bdebdab3c12fbaf462ea3739b8` (the `bcdevenv/` CLI folder; the AL test-runner
 > app that lived in that repository's `build/testrunner/` is now [`testrunner/`](testrunner/app.json)).
 > Changes made here: the per-codeunit test protocol, DisabledTests support and the AL tool
-> executor in `run-tests` and the runner app, `build-image` company/server-setting options and license checks, and the
+> executor in `run-tests` and the runner app (with its optional parts in
+> [`testrunner-optional/`](testrunner-optional)), `build-image` company/server-setting options and license checks, and the
 > SQL Server Express setup script (`container/Install-SqlExpress.ps1`, replacing Chocolatey).
 >
 > In this repository the CLI drives the CI build: the
@@ -299,8 +300,8 @@ reaches the next test codeunit:
   date of today and fail with "The Shopify Admin API used by your current Shopify
   connector is no longer supported". The Test Runner does not reset them either; why
   upstream runs do not show this cascade is not verified. This goes beyond what 130453
-  and 130301 do. Compiled only when the library is installed (preprocessor symbol
-  `BCDEVENV_SYSAPPTESTLIB`, see [Known differences](#bcapps-ci-pipeline));
+  and 130301 do. Compiled only when the library is installed (runner part
+  `SystemApplicationTestLibrary`, codeunit 50112, see [Known differences](#bcapps-ci-pipeline));
 - runs codeunit 130301 `Reset State Before Test Run` (random seed 1, the legacy
   permission catalog, the temporary notification context) and codeunit 132553
   `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
@@ -654,9 +655,9 @@ saw one work date per job).
 Single-instance state also carries over between the test codeunits of a batch (one
 session, see [Running tests](#running-tests)). The reset resets only the state of
 `System Application Test Library` (Environment Info testability flags, Azure Key Vault
-secrets), and only when that app is installed: the action then adds the dependency and
-the `BCDEVENV_SYSAPPTESTLIB` symbol to its copy of the runner's `app.json`, and logs
-it. Single-instance state of other apps is not reset, because the runner does not
+secrets), and only when that app is installed: the action then adds the runner part
+`SystemApplicationTestLibrary` and its dependency (see below), and logs it.
+Single-instance state of other apps is not reset, because the runner does not
 depend on them, and module isolated storage of another app cannot be cleared from the
 runner. Known cases, from the CI failures (cause not verified for each test):
 
@@ -701,19 +702,19 @@ selected method's `TestPermissions` (see [Running tests](#running-tests)); it ne
 assignments. Codeunit 132553 is in `Prevent
 Metadata Updates Library`, which the pipeline does not publish, so it normally does
 not run. The mock part is compiled into the runner only when the `Permissions Mock`
-app is in the install set (the action adds the dependency and the
-`BCDEVENV_PERMISSIONSMOCK` preprocessor symbol to its copy of the runner's
-`app.json`, and logs it); otherwise the reset does not control the mock. Switch the
+app is in the install set (the action adds the runner part `PermissionsMock`,
+codeunit 50111, and its dependency, and logs it); otherwise the reset does not
+control the mock. Switch the
 mock part with the action input `testPermissionsMock` or the AL-Go setting
 `bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
 both.
 
 The per-method part (codeunit 50110: the last error, the random seed, the temporary
 notification context) is compiled only when `Application Test Library` is in the install
-set: the action then also adds that dependency and the `BCDEVENV_APPTESTLIB` symbol, and
-logs it, so projects without it (System Application, Business Foundation) are
-unaffected. Its restart of a stopped mock also needs `Permissions Mock`
-(`BCDEVENV_PERMISSIONSMOCK`). It covers only methods that raise `OnTestInitialize` (in
+set: the action then also adds the runner part `ApplicationTestLibrary` and that
+dependency, and logs it, so projects without it (System Application, Business
+Foundation) are unaffected. Its restart of a stopped mock also needs `Permissions Mock`
+(the `PermissionsMock` part). It covers only methods that raise `OnTestInitialize` (in
 practice through their `Initialize()`), and it runs there, not before the method: calls
 that a method makes on the stopped mock before its `Initialize()` (for example
 `SetOutsideO365Scope`) do nothing, and the mock then starts with the base; an error that
@@ -723,6 +724,21 @@ the mock and calls `Initialize()` again gets it restarted. Its order among other
 `OnTestInitialize` subscribers is not defined. The restarts are not counted: a count
 written in the test's session would be rolled back by its test isolation, and a commit
 there would change the test's transaction.
+
+**Optional runner parts.** The code that needs `Permissions Mock`, `Application Test
+Library` or `System Application Test Library` lives outside the runner app, in
+[`testrunner-optional/`](testrunner-optional) (`PermissionsMock`: codeunit 50111,
+`ApplicationTestLibrary`: 50110, `SystemApplicationTestLibrary`: 50112), so the runner
+app compiles on its own without these apps. For each of them in the install set, the
+action copies the part into `optional/<part>` of its copy of the runner and adds the
+app as a dependency to that copy's `app.json` (`Set-BcDevEnvRunner*` in
+`BcDevEnvPipeline.psm1`), and logs `(runner part <part>)`. The state reset (50102)
+raises one internal event per optional step, in its fixed order (the order of the
+subscribers to one event is not defined), and 50110 asks it to restart a stopped mock
+the same way; without its part an event does nothing. The state probe learns from
+another event which parts are compiled. Preprocessor symbols are not used for this:
+the repository's `TestPreprocessorSymbols` check (Verify App Changes) allows only
+`CLEANnn`/`CLEANSCHEMAnn` symbols in AL files.
 
 The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
 `OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are

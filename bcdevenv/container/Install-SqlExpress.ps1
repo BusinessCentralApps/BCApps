@@ -36,6 +36,13 @@
     default folders.
     Runs in Windows PowerShell 5.1 and PowerShell 7.
 #>
+# PSReviewUnusedParameter does not trace script parameters into the script's functions, which use these.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'InstallerSha256', Justification = 'Used by Save-Installer')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'DownloadAttempts', Justification = 'Used by Save-Installer')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'NoSectorSizeMitigation', Justification = 'Used by Resolve-SqlLayout')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'VirtualDiskPath', Justification = 'Used by New-SqlVolume')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'VirtualDiskSizeGB', Justification = 'Used by New-SqlVolume')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'ConnectionTimeoutSeconds', Justification = 'Used by Test-SqlConnection')]
 [CmdletBinding()]
 param(
     [string] $InstanceName = 'SQLEXPRESS',

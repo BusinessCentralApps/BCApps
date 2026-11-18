@@ -226,8 +226,11 @@ try {
         Copy-Item -LiteralPath (Join-Path $toolRoot 'testrunner') -Destination $runnerSource -Recurse
         $runnerRootIds = @($runnerDependencyIds)
         if ($executor.Executor -eq 'altool') {
+            # The optional parts of the runner (bcdevenv/testrunner-optional) are copied into its source, with the
+            # dependency on their library, only when the library is installed.
+            $runnerParts = Join-Path $toolRoot 'testrunner-optional'
             # The state reset before every test codeunit controls the permissions mock only when it is installed.
-            $mockApp = Set-BcDevEnvRunnerPermissionsMock -AppJsonPath (Join-Path $runnerSource 'app.json') -Apps $apps
+            $mockApp = Set-BcDevEnvRunnerPermissionsMock -RunnerSource $runnerSource -PartSource $runnerParts -Apps $apps
             if ($mockApp) {
                 $runnerRootIds += $mockApp.Id
                 Write-Host "Permissions Mock $($mockApp.Version) is installed: the state reset sets the permissions mock $permissionsMockLabel."
@@ -236,19 +239,19 @@ try {
                 Write-Host "Permissions Mock is not installed: the state reset does not control the permissions mock."
             }
             # The per-method reset needs Application Test Library ("Library - Test Initialize", "Library - Random").
-            $libraryApp = Set-BcDevEnvRunnerApplicationTestLibrary -AppJsonPath (Join-Path $runnerSource 'app.json') -Apps $apps
+            $libraryApp = Set-BcDevEnvRunnerApplicationTestLibrary -RunnerSource $runnerSource -PartSource $runnerParts -Apps $apps
             if ($libraryApp) {
                 $runnerRootIds += $libraryApp.Id
                 $restart = if ($mockApp) { ' and, with the permissions mock stopped, the mock restarted with its codeunit''s base' } else { ' (no permissions mock restart: Permissions Mock is not installed)' }
-                Write-Host "Application Test Library $($libraryApp.Version) is installed (BCDEVENV_APPTESTLIB): a test method whose Initialize raises Library - Test Initialize's OnTestInitialize gets the last error cleared, the random seed 1 and the temporary notification context cleared$restart."
+                Write-Host "Application Test Library $($libraryApp.Version) is installed (runner part ApplicationTestLibrary): a test method whose Initialize raises Library - Test Initialize's OnTestInitialize gets the last error cleared, the random seed 1 and the temporary notification context cleared$restart."
             }
             else {
                 Write-Host "Application Test Library is not installed: the test state is reset per test codeunit only."
             }
-            $systemLibraryApp = Set-BcDevEnvRunnerSystemApplicationTestLibrary -AppJsonPath (Join-Path $runnerSource 'app.json') -Apps $apps
+            $systemLibraryApp = Set-BcDevEnvRunnerSystemApplicationTestLibrary -RunnerSource $runnerSource -PartSource $runnerParts -Apps $apps
             if ($systemLibraryApp) {
                 $runnerRootIds += $systemLibraryApp.Id
-                Write-Host "System Application Test Library $($systemLibraryApp.Version) is installed (BCDEVENV_SYSAPPTESTLIB): the state reset turns off the testability flags of Environment Info Test Library and clears the secrets of Azure Key Vault Test Library before every test codeunit."
+                Write-Host "System Application Test Library $($systemLibraryApp.Version) is installed (runner part SystemApplicationTestLibrary): the state reset turns off the testability flags of Environment Info Test Library and clears the secrets of Azure Key Vault Test Library before every test codeunit."
             }
             else {
                 Write-Host "System Application Test Library is not installed: the state reset does not reset its testability flags or key vault secrets."

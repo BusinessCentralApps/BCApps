@@ -22,7 +22,7 @@
 //   * restores "Application Area Setup" to the baseline captured before the first test (codeunit 50108) and
 //     commits (the reset codeunits have RequiredTestIsolation = Disabled), so that a row an earlier test
 //     committed does not give the following logins its application area;
-//   * with System Application Test Library installed (BCDEVENV_SYSAPPTESTLIB), resets single-instance state
+//   * with System Application Test Library installed (its part, codeunit 50112), resets single-instance state
 //     of that library that test codeunits set and leave behind: the testability flags of Environment Info
 //     Test Library (SaaS, sandbox, preview, early preview) back to off, and the secret provider and cache of
 //     Azure Key Vault Test Library (ClearSecrets). Shpfy Test Shopify, for example, leaves SaaS on and a mock
@@ -31,31 +31,28 @@
 //     Billing's skip flags, for example) cannot be reset without depending on those apps, and the Shopify
 //     connector's own API version cache (module isolated storage of the Shopify app) cannot be cleared from
 //     here; it stays only when a codeunit with RequiredTestIsolation = Disabled commits it;
-//   * sets up the permissions mock: started without assignments, or with the D365 Full Access base of 130302
-//     (that the base reaches the next codeunit is not verified yet), or stopped;
+//   * with Permissions Mock installed (its part, codeunit 50111), sets up the permissions mock: started without
+//     assignments, or with the D365 Full Access base of 130302 (that the base reaches the next codeunit is not
+//     verified yet), or stopped;
 //   * runs 130301 and 132553 when present; whether their state reaches the next codeunit is not verified;
 //   * clears the last error, which otherwise reaches the next test codeunit (tests that assert an empty
 //     GetLastErrorText failed with an earlier codeunit's error).
-// The reset works per codeunit, not per test method. It records the permissions mock base it applied
-// (committed, isolated storage): when a test method of the codeunit initializes, codeunit 50110 clears the
-// last error, sets the random seed 1, clears the temporary notification context and, when it finds the
-// mock stopped (an earlier method stopped it), restarts it with that base through
-// RestartStoppedPermissionsMock, as the Test Runner does before every method.
+// The reset works per codeunit, not per test method. With the Permissions Mock part, it records the permissions
+// mock base it applied (committed, isolated storage): when a test method of the codeunit initializes, codeunit
+// 50110 (the Application Test Library part) clears the last error, sets the random seed 1, clears the temporary
+// notification context and, when the Permissions Mock part finds the mock stopped (an earlier method stopped
+// it), restarts it with that base through RestartStoppedPermissionsMock, as the Test Runner does before every method.
 //
 // Optional objects are run through AllObj checks, as 130453 does, so this app gains no dependencies
-// on test libraries. Only the permissions mock and System Application Test Library are referenced
-// directly; the pipeline compiles those parts (preprocessor symbols BCDEVENV_PERMISSIONSMOCK and
-// BCDEVENV_SYSAPPTESTLIB, plus the dependency on the app) only when the app is installed.
+// on test libraries. Only Permissions Mock, Application Test Library and System Application Test Library
+// are referenced directly, each by its own part: a folder of bcdevenv/testrunner-optional (PermissionsMock,
+// ApplicationTestLibrary, SystemApplicationTestLibrary) that the pipeline copies into its copy of this app's
+// source, with the dependency on the library, only when the library is installed. The parts subscribe to
+// the internal events below, one event per step, so that no step depends on the order of subscribers; an
+// event without its part does nothing. OnGetCompiledParts tells which parts were compiled in.
 namespace BcDevEnv.TestRunner;
 
 using System.Reflection;
-#if BCDEVENV_PERMISSIONSMOCK
-using System.TestLibraries.Security.AccessControl;
-#endif
-#if BCDEVENV_SYSAPPTESTLIB
-using System.TestLibraries.Azure.KeyVault;
-using System.TestLibraries.Environment;
-#endif
 
 codeunit 50102 "BcDevEnv Test State Reset"
 {
@@ -63,9 +60,6 @@ codeunit 50102 "BcDevEnv Test State Reset"
 
     var
         MockBaseKeyTok: Label 'BcDevEnv.TestRun.PermissionsMockBase', Locked = true;
-        NoAssignmentsBaseTok: Label 'no assignments', Locked = true;
-        FullAccessBaseTok: Label 'D365 Full Access', Locked = true;
-        StoppedBaseTok: Label 'stopped', Locked = true;
         NoBaseTxt: Label 'none recorded', Locked = true;
 
     /// <summary>
@@ -78,7 +72,7 @@ codeunit 50102 "BcDevEnv Test State Reset"
     end;
 
     /// <summary>
-    /// Resets the test state before the next test codeunit: restores "Application Area Setup" and commits, resets the single-instance state of System Application Test Library (when compiled in), sets up the permissions mock and clears the last error.
+    /// Resets the test state before the next test codeunit: restores "Application Area Setup" and commits, resets the single-instance state of System Application Test Library (with its part), sets up the permissions mock (with its part) and clears the last error.
     /// </summary>
     /// <param name="StartPermissionsMock">true: the permissions mock is (re)started, the state the Test Runner gives every test; false: it is stopped.</param>
     /// <param name="FullAccessBase">With StartPermissionsMock: also run codeunit 130302 "Set State Test Run" (when present), which assigns the D365 Full Access base the Test Runner gives every test method whose TestPermissions is not Disabled; otherwise the mock has no assignments.</param>
@@ -86,32 +80,22 @@ codeunit 50102 "BcDevEnv Test State Reset"
     var
         AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
     begin
-#if BCDEVENV_PERMISSIONSMOCK
-        // Dispose the previous codeunit's mock and its assignments first: Permissions Mock's Start
-        // (also called by 130301 and 130302) replaces the mock without disposing it. The restore below
-        // also needs the real permissions.
-        StopPermissionsMock();
-        // The base that a test method of the next codeunit restores when it finds the mock stopped (codeunit 50110).
-        SetPermissionsMockBase(StartPermissionsMock, FullAccessBase);
-#endif
+        // Permissions Mock part: disposes the previous codeunit's mock and its assignments first (Permissions Mock's
+        // Start, also called by 130301 and 130302, replaces the mock without disposing it; the restore below also
+        // needs the real permissions), then records the base that a test method of the next codeunit restores when
+        // it finds the mock stopped (codeunit 50110).
+        OnStopPermissionsMockAndRecordBase(StartPermissionsMock, FullAccessBase);
         AppAreaSetupReset.Restore();
         // Keep the restore (and the recorded base) even when a later step fails.
         Commit();
-#if BCDEVENV_SYSAPPTESTLIB
-        ResetSystemApplicationTestLibraries();
-#endif
+        // System Application Test Library part: that library's single-instance state.
+        OnResetSingleInstanceState();
 
         // codeunit 130301 "Reset State Before Test Run": random seed 1, the legacy permission catalog
         // (which starts the permissions mock) and the temporary notification context.
         RunIfPresent(130301);
-#if BCDEVENV_PERMISSIONSMOCK
-        if StartPermissionsMock then begin
-            if FullAccessBase then
-                SetFullAccessBase();
-            StartPermissionsMockWithoutAssignments();
-        end else
-            StopPermissionsMock();
-#endif
+        // Permissions Mock part: started without assignments, with the D365 Full Access base, or stopped.
+        OnSetUpPermissionsMock(StartPermissionsMock, FullAccessBase);
         // codeunit 132553 "Block Changes to System Tables" (Prevent Metadata Updates Library, which the
         // pipeline does not publish, like the native one). It binds its subscribers in this session.
         RunIfPresent(132553);
@@ -140,78 +124,63 @@ codeunit 50102 "BcDevEnv Test State Reset"
         exit(NoBaseTxt);
     end;
 
-#if BCDEVENV_PERMISSIONSMOCK
     /// <summary>
     /// Restarts a stopped permissions mock with the base that the last state reset applied to the current test
     /// codeunit, as the Test Runner does before every test method: no assignments (codeunit 130301 "Reset State
     /// Before Test Run", which also sets the random seed 1 and clears the temporary notification context), or
     /// the D365 Full Access base (130301, then 130302 "Set State Test Run"). Does nothing when the mock is
     /// started (its assignments stay as the test set them), when the reset stopped the mock
-    /// (--permissions-mock off), or when no reset recorded a base since PrepareTests.
+    /// (--permissions-mock off), when no reset recorded a base since PrepareTests, or without the Permissions
+    /// Mock part (codeunit 50111, which does the restart).
     /// </summary>
     /// <returns>Whether the mock was restarted.</returns>
     procedure RestartStoppedPermissionsMock(): Boolean
     var
-        PermissionsMock: Codeunit "Permissions Mock";
-        Base: Text;
+        Restarted: Boolean;
     begin
-        if PermissionsMock.IsStarted() then
-            exit(false);
-        if not IsolatedStorage.Get(MockBaseKeyTok, DataScope::Module, Base) then
-            exit(false);
-        case Base of
-            NoAssignmentsBaseTok:
-                RunIfPresent(130301);
-            FullAccessBaseTok:
-                begin
-                    RunIfPresent(130301);
-                    SetFullAccessBase();
-                end;
-            else
-                exit(false);
-        end;
-        StartPermissionsMockWithoutAssignments();
-        exit(true);
+        OnRestartStoppedPermissionsMock(Restarted);
+        exit(Restarted);
     end;
 
-    local procedure SetPermissionsMockBase(StartPermissionsMock: Boolean; FullAccessBase: Boolean)
-    var
-        Base: Text;
+    /// <summary>Records the permissions mock base of the current state reset (Permissions Mock part).</summary>
+    internal procedure SetPermissionsMockBase(Base: Text)
     begin
-        Base := StoppedBaseTok;
-        if StartPermissionsMock then
-            if FullAccessBase then
-                Base := FullAccessBaseTok
-            else
-                Base := NoAssignmentsBaseTok;
         IsolatedStorage.Set(MockBaseKeyTok, Base, DataScope::Module);
     end;
-#endif
 
-#if BCDEVENV_SYSAPPTESTLIB
-    // Single-instance state that tests set through System Application Test Library and do not reset, and that the AL
-    // tool's session keeps for the next test codeunits; back to the state of a new session: no testability flags, no
-    // secret provider (the key vault client initializes again on its next use).
-    local procedure ResetSystemApplicationTestLibraries()
-    var
-        EnvironmentInfoTestLibrary: Codeunit "Environment Info Test Library";
-        AzureKeyVaultTestLibrary: Codeunit "Azure Key Vault Test Library";
+    /// <summary>The permissions mock base that the last state reset recorded, if any (Permissions Mock part).</summary>
+    internal procedure GetPermissionsMockBase(var Base: Text): Boolean
     begin
-        EnvironmentInfoTestLibrary.SetTestabilitySoftwareAsAService(false);
-        EnvironmentInfoTestLibrary.SetTestabilitySandbox(false);
-        EnvironmentInfoTestLibrary.SetTestabilityPreview(false);
-        EnvironmentInfoTestLibrary.SetTestabilityEarlyPreview(false);
-        AzureKeyVaultTestLibrary.ClearSecrets();
+        exit(IsolatedStorage.Get(MockBaseKeyTok, DataScope::Module, Base));
     end;
-#endif
 
-    local procedure RunIfPresent(CodeunitId: Integer)
+    /// <summary>Whether the permissions mock is started, for the state probe.</summary>
+    /// <returns>false without the Permissions Mock part (Started is then false).</returns>
+    internal procedure GetPermissionsMockState(var Started: Boolean): Boolean
+    var
+        Handled: Boolean;
+    begin
+        Started := false;
+        OnGetPermissionsMockState(Started, Handled);
+        exit(Handled);
+    end;
+
+    /// <summary>Which optional parts (bcdevenv/testrunner-optional) were compiled into this app, for the state probe.</summary>
+    internal procedure GetCompiledParts(var PermissionsMockPart: Boolean; var ApplicationTestLibraryPart: Boolean; var SystemApplicationTestLibraryPart: Boolean)
+    begin
+        PermissionsMockPart := false;
+        ApplicationTestLibraryPart := false;
+        SystemApplicationTestLibraryPart := false;
+        OnGetCompiledParts(PermissionsMockPart, ApplicationTestLibraryPart, SystemApplicationTestLibraryPart);
+    end;
+
+    internal procedure RunIfPresent(CodeunitId: Integer)
     begin
         if IsPresent(CodeunitId) then
             Codeunit.Run(CodeunitId);
     end;
 
-    local procedure IsPresent(CodeunitId: Integer): Boolean
+    internal procedure IsPresent(CodeunitId: Integer): Boolean
     var
         AllObj: Record AllObj;
     begin
@@ -220,34 +189,41 @@ codeunit 50102 "BcDevEnv Test State Reset"
         exit(not AllObj.IsEmpty());
     end;
 
-#if BCDEVENV_PERMISSIONSMOCK
-    // codeunit 130302 "Set State Test Run" (Tests-TestLibraries): Permission Test Catalog's Restrictive
-    // initialization, which starts the permissions mock and assigns D365 Full Access with All Objects, Test
-    // Tables, D365 Basic and LOCAL (when present), the base that Library - Lower Permissions lowers from.
-    local procedure SetFullAccessBase()
+    // The steps of Reset that the optional parts implement. Internal: only the parts of this app subscribe.
+
+    // Permissions Mock part: stops the mock and records the base for RestartStoppedPermissionsMock.
+    [InternalEvent(false)]
+    local procedure OnStopPermissionsMockAndRecordBase(StartPermissionsMock: Boolean; FullAccessBase: Boolean)
     begin
-        if not IsPresent(130302) then
-            exit;
-        // 130301 has just started a mock; dispose it before 130302 starts the next one.
-        StopPermissionsMock();
-        Codeunit.Run(130302);
     end;
 
-    local procedure StartPermissionsMockWithoutAssignments()
-    var
-        PermissionsMock: Codeunit "Permissions Mock";
+    // System Application Test Library part: resets that library's single-instance state.
+    [InternalEvent(false)]
+    local procedure OnResetSingleInstanceState()
     begin
-        // 130301 (or 130302) has just started a new mock when it is installed.
-        if not PermissionsMock.IsStarted() then
-            PermissionsMock.Start();
     end;
 
-    local procedure StopPermissionsMock()
-    var
-        PermissionsMock: Codeunit "Permissions Mock";
+    // Permissions Mock part: starts the mock without assignments or with the D365 Full Access base, or stops it.
+    [InternalEvent(false)]
+    local procedure OnSetUpPermissionsMock(StartPermissionsMock: Boolean; FullAccessBase: Boolean)
     begin
-        if PermissionsMock.IsStarted() then
-            PermissionsMock.Stop();
     end;
-#endif
+
+    // Permissions Mock part: restarts a stopped mock with the recorded base.
+    [InternalEvent(false)]
+    local procedure OnRestartStoppedPermissionsMock(var Restarted: Boolean)
+    begin
+    end;
+
+    // Permissions Mock part: whether the mock is started.
+    [InternalEvent(false)]
+    local procedure OnGetPermissionsMockState(var Started: Boolean; var Handled: Boolean)
+    begin
+    end;
+
+    // Every part sets its own flag.
+    [InternalEvent(false)]
+    local procedure OnGetCompiledParts(var PermissionsMockPart: Boolean; var ApplicationTestLibraryPart: Boolean; var SystemApplicationTestLibraryPart: Boolean)
+    begin
+    end;
 }
