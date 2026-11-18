@@ -62,6 +62,9 @@ $containerAlToolFolder = 'C:\altool'
 $containerAlTool = "$containerAlToolFolder\altool.dll"
 $containerDotnet = 'C:\Program Files\dotnet\dotnet.exe'
 $devPort = 7049
+# The container authenticates with NavUserPassword: SUPER user $adminUser, whose password is generated per run.
+$adminUser = 'admin'
+$passwordVariable = 'BCDEVENV_ADMIN_PASSWORD'
 
 function Write-Section([string] $Title) { Write-Host "::endgroup::"; Write-Host "::group::$Title" }
 
@@ -95,6 +98,7 @@ Write-Host "Test type:     $(if ($plan.TestType) { $plan.TestType } else { '(non
 Write-Host "Company:       $($plan.CompanyName)$(if ($plan.EvaluationCompany) { ' (evaluation company)' })"
 Write-Host "Company setup: $(if (@($plan.CompanyCodeunits).Count) { $plan.CompanyCodeunits -join ', ' } else { '(empty company)' })"
 foreach ($pass in $plan.Passes) { Write-Host "Test pass:     $($pass.Name), test runner $($pass.RunnerId)" }
+Write-Host "Authentication: NavUserPassword, SUPER user '$adminUser'; the password is generated for this run, masked, and set in the running container by 'bcdevenv set-password' (never in the image)"
 $executor = Get-BcDevEnvTestExecutorSettings -Settings $settings -Executor $TestExecutor -AlToolVersion $AlToolVersion -AppTimeoutMinutes $AppTestTimeoutMinutes -PermissionsMock $TestPermissionsMock -StateProbe $TestStateProbe
 $executorLabel = if ($executor.Executor -eq 'altool') { "altool $($executor.AlToolVersion)" } else { 'odata' }
 $permissionsMockLabel = if ($executor.PermissionsMock) { 'on (started; with the D365 Full Access base unless TestPermissions is Disabled)' } else { 'off (stopped)' }
@@ -163,6 +167,11 @@ Write-Host "Container: $($names.ContainerName); image: $($names.ImageTag); work 
 $licensePath = $null
 $succeeded = $false
 $dockerReady = $false
+# Masked before any use (on the runner's own output, not in BuildOutput.txt). Docker gets it by variable name
+# only ('docker exec -e NAME' reads the value from this process's environment), so it is never on a command
+# line, in the image or in 'docker inspect'.
+$adminPassword = New-BcDevEnvPassword
+Write-BcDevEnvMask -Value $adminPassword
 try {
     # --- Docker engine (checked first so that a runner without a running engine fails fast) --------
     Write-Section 'Docker engine'
@@ -306,7 +315,7 @@ try {
     $lines = @("# $Project ($BuildMode) - install order") + @($apps | ForEach-Object { $_.Path })
     if ($runnerApp) { $lines += $runnerApp }
     Set-Content -LiteralPath $appList -Value $lines -Encoding UTF8
-    $buildArguments = @('build-image', '--env', $names.EnvName, '--tag', $names.ImageTag, '--app-list', $appList, '--company', $plan.CompanyName)
+    $buildArguments = @('build-image', '--env', $names.EnvName, '--tag', $names.ImageTag, '--app-list', $appList, '--company', $plan.CompanyName, '--credential-type', 'NavUserPassword', '--admin-user', $adminUser)
     if ($plan.EvaluationCompany) { $buildArguments += '--evaluation-company' }
     foreach ($codeunit in @($plan.CompanyCodeunits)) { $buildArguments += @('--company-codeunit', $codeunit) }
     foreach ($setting in @($plan.ServerSettings)) { $buildArguments += @('--server-setting', $setting) }
@@ -318,9 +327,11 @@ try {
 
     Write-Section 'Start the container'
     Invoke-BcDevEnvNativeCommand -FilePath $bcdevenv -Arguments @('start', '--image', $names.ImageTag, '--name', $names.ContainerName, '--detach') -Description 'bcdevenv start' | Out-Null
+    Set-Item -LiteralPath "Env:$passwordVariable" -Value $adminPassword
+    Invoke-Docker -Arguments @('exec', '-e', $passwordVariable, '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli, 'set-password', '--user', $adminUser, '--password-env', $passwordVariable) -Description "bcdevenv set-password ($adminUser)" | Out-Null
     $requiredText = if ($runnerApp) { 'BcDevEnvTestRunner_PrepareTests' } else { '' }
-    $probe = ConvertTo-BcDevEnvEncodedScript -Script (Get-BcDevEnvReadinessScript -ODataUrl $odataUrl -RequiredText $requiredText)
-    $probeExit = Invoke-Docker -Arguments @('exec', $names.ContainerName, 'powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $probe) -AllowFailure -Description 'OData readiness probe'
+    $probe = ConvertTo-BcDevEnvEncodedScript -Script (Get-BcDevEnvReadinessScript -ODataUrl $odataUrl -RequiredText $requiredText -UserName $adminUser -PasswordVariable $passwordVariable)
+    $probeExit = Invoke-Docker -Arguments @('exec', '-e', $passwordVariable, $names.ContainerName, 'powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $probe) -AllowFailure -Description 'OData readiness probe'
     if ($probeExit -ne 0) {
         Invoke-Docker -Arguments @('logs', '--tail', '80', $names.ContainerName) -AllowFailure | Out-Null
         throw 'The Business Central server in the container did not become ready (OData $metadata).'
@@ -374,8 +385,8 @@ try {
             $hostResult = Join-Path $resultsFolder $resultName
             $runArguments = Get-BcDevEnvRunTestsArguments -ODataUrl $odataUrl -CompanyName $plan.CompanyName -App $app -Pass $pass -DisabledTestsRoots $containerDisabledRoots -ResultFile $containerResult `
                 -Executor $executor.Executor -AlToolPath $containerAlTool -DotnetPath $containerDotnet -DevPort $devPort -ServerInstance 'BC' -AppTimeoutMinutes $executor.AppTimeoutMinutes `
-                -PermissionsMock $executor.PermissionsMock -StateProbe $executor.StateProbe
-            $exitCode = Invoke-Docker -Arguments (@('exec', '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli) + $runArguments) -AllowFailure -Description "bcdevenv run-tests ($($app.Name))"
+                -PermissionsMock $executor.PermissionsMock -StateProbe $executor.StateProbe -UserName $adminUser -PasswordVariable $passwordVariable
+            $exitCode = Invoke-Docker -Arguments (@('exec', '-e', $passwordVariable, '-u', 'ContainerAdministrator', $names.ContainerName, $containerCli) + $runArguments) -AllowFailure -Description "bcdevenv run-tests ($($app.Name))"
             $copyExit = Invoke-Docker -Arguments @('cp', "$($names.ContainerName):$containerResult", $hostResult) -AllowFailure -Description 'Copying the test results'
             if ($copyExit -ne 0 -or -not (Test-Path -LiteralPath $hostResult)) {
                 $infrastructureErrors += "$($app.Name) [$($pass.Name)]: no test report was produced (run-tests exit code $exitCode)."
@@ -423,6 +434,7 @@ finally {
         Invoke-Docker -Arguments @('image', 'rm', '-f', $names.ImageTag) -AllowFailure -Description 'docker image rm' | Out-Null
     }
     if ($licensePath -and (Test-Path -LiteralPath $licensePath)) { Remove-Item -LiteralPath $licensePath -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath "Env:$passwordVariable" -ErrorAction SilentlyContinue
     foreach ($folder in @($work, $dataHome)) {
         if (Test-Path -LiteralPath $folder) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
     }

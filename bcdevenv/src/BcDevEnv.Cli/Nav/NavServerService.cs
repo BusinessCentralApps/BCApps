@@ -421,6 +421,39 @@ public sealed class NavServerService
         Log.Success($"Granted SUPER to '{windowsAccount}'.");
     }
 
+    /// <summary>
+    /// Creates a NavUserPassword user (user name + password) and grants it SUPER, as the official
+    /// images do for their admin user. The password is passed as a SecureString parameter and never logged.
+    /// </summary>
+    public void CreateSuperUser(string instance, string userName, System.Security.SecureString password)
+    {
+        Log.Info($"Creating SUPER user '{userName}' (user name/password) on '{instance}'...");
+        _rs.Invoke("New-NAVServerUser", new Dictionary<string, object?>
+        {
+            ["ServerInstance"] = instance,
+            ["UserName"] = userName,
+            ["Password"] = password,
+        });
+        _rs.Invoke("New-NAVServerUserPermissionSet", new Dictionary<string, object?>
+        {
+            ["ServerInstance"] = instance,
+            ["UserName"] = userName,
+            ["PermissionSetId"] = "SUPER",
+        });
+        Log.Success($"Granted SUPER to '{userName}'.");
+    }
+
+    /// <summary>Sets the password of a NavUserPassword user (never logged).</summary>
+    public void SetUserPassword(string instance, string userName, System.Security.SecureString password)
+    {
+        _rs.Invoke("Set-NAVServerUser", new Dictionary<string, object?>
+        {
+            ["ServerInstance"] = instance,
+            ["UserName"] = userName,
+            ["Password"] = password,
+        });
+    }
+
     public void Stop(string instance)
     {
         _rs.Invoke("Stop-NAVServerInstance", new Dictionary<string, object?> { ["ServerInstance"] = instance });

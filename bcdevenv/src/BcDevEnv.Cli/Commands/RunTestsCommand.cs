@@ -159,6 +159,7 @@ public static class RunTestsCommand
             throw new BcDevEnvException(
                 "--disabled-tests needs the per-codeunit protocol (it excludes tests before execution); remove --protocol run-all.");
 
+        var credentials = ResolveCredentials(a);
         var options = new NavTestService.RunOptions
         {
             ODataBaseUrl = odataUrl,
@@ -168,9 +169,9 @@ public static class RunTestsCommand
             ExtensionId = a.Get("extension"),
             TestCodeunitFilter = a.Get("test-codeunit"),
             TestSuite = a.GetOr("test-suite", "DEFAULT"),
-            Authentication = a.GetOr("auth", "Windows"),
-            UserName = a.Get("user"),
-            Password = a.Get("password"),
+            Authentication = credentials.Authentication,
+            UserName = credentials.UserName,
+            Password = credentials.Password,
             TimeoutMinutes = int.TryParse(a.Get("timeout-minutes"), out var t) ? t : 30,
             TestType = ParseTestType(a.Get("test-type")),
             RequiredTestIsolation = ParseRequiredTestIsolation(a.Get("required-test-isolation")),
@@ -256,6 +257,30 @@ public static class RunTestsCommand
 
     public const string ODataExecutor = "odata";
     public const string AlToolExecutor = "altool";
+
+    /// <summary>
+    /// --auth (Windows, default, or UserPassword / NavUserPassword), --user and the password: --password,
+    /// else the environment variable --password-env names (default BCDEVENV_ADMIN_PASSWORD), which keeps
+    /// it off the command line. User name/password authentication without both is an error.
+    /// </summary>
+    public static (string Authentication, string? UserName, string? Password) ResolveCredentials(ParsedArgs a)
+    {
+        var authentication = AuthenticationNames.ClientAuthentication(a.Get("auth"));
+        if (authentication == AuthenticationNames.Windows) return (authentication, null, null);
+
+        var userName = a.Get("user");
+        if (string.IsNullOrWhiteSpace(userName))
+            throw new BcDevEnvException("--auth UserPassword needs --user <name>.");
+        var password = a.Get("password");
+        if (string.IsNullOrEmpty(password))
+        {
+            var variable = a.GetOr("password-env", AuthenticationNames.PasswordVariable);
+            password = Environment.GetEnvironmentVariable(variable);
+            if (string.IsNullOrEmpty(password))
+                throw new BcDevEnvException($"--auth UserPassword needs --password or the password in the environment variable '{variable}' (--password-env).");
+        }
+        return (authentication, userName.Trim(), password);
+    }
 
     /// <summary>--executor: odata (default; the runner's RunCodeunit) or altool (the AL tool's runtests).</summary>
     public static string ParseExecutor(string? value)

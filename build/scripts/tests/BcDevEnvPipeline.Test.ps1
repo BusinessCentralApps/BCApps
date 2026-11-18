@@ -381,6 +381,62 @@ Describe "Get-BcDevEnvReadinessScript and ConvertTo-BcDevEnvEncodedScript" {
     It "accepts any metadata when no text is required" {
         $script = Get-BcDevEnvReadinessScript -ODataUrl 'http://localhost:7048/BC/ODataV4' -RequiredText '' -Attempts 1 -DelaySeconds 0
         $script | Should -Match ([regex]::Escape("if (-not '' -or"))
+        $script | Should -Match 'UseDefaultCredentials'
+    }
+
+    It "authenticates with Basic from a container environment variable, never a literal password, when a user is given" {
+        $script = Get-BcDevEnvReadinessScript -ODataUrl 'http://localhost:7048/BC/ODataV4' -RequiredText 'X' -UserName "ad'min" -PasswordVariable 'MY_PW'
+        $tokens = $null; $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$tokens, [ref]$errors) | Out-Null
+        @($errors).Count | Should -Be 0
+        $script | Should -Not -Match 'UseDefaultCredentials'
+        $script | Should -Match ([regex]::Escape('$env:MY_PW'))
+        $script | Should -Match ([regex]::Escape("'ad''min'"))
+        $script | Should -Match 'Basic'
+        { Get-BcDevEnvReadinessScript -ODataUrl 'u' -RequiredText '' -UserName 'admin' -PasswordVariable 'BAD-NAME' } | Should -Throw
+    }
+
+    It "fails the probe when the password variable is missing in the container" {
+        $script = Get-BcDevEnvReadinessScript -ODataUrl 'http://127.0.0.1:1/BC/ODataV4' -RequiredText '' -Attempts 1 -DelaySeconds 0 -UserName 'admin' -PasswordVariable ('BCDEVENV_TEST_PW_' + [guid]::NewGuid().ToString('N'))
+        $output = & pwsh -NoProfile -NonInteractive -EncodedCommand (ConvertTo-BcDevEnvEncodedScript -Script $script) 2>&1
+        $LASTEXITCODE | Should -Be 1
+        ($output -join "`n") | Should -Match 'with the password is not set'
+    }
+}
+
+Describe "New-BcDevEnvPassword and Write-BcDevEnvMask" {
+    It "generates distinct passwords with every character class" {
+        $passwords = @(1..30 | ForEach-Object { New-BcDevEnvPassword })
+        foreach ($p in $passwords) {
+            $p.Length | Should -Be 32
+            $p | Should -MatchExactly '[A-Z]'
+            $p | Should -MatchExactly '[a-z]'
+            $p | Should -Match '[0-9]'
+            $p | Should -Match '[-_.!]'
+            $p | Should -Match '^[A-Za-z0-9_.!-]+$'
+        }
+        @($passwords | Select-Object -Unique).Count | Should -Be 30
+        (New-BcDevEnvPassword -Length 8).Length | Should -Be 8
+        { New-BcDevEnvPassword -Length 7 } | Should -Throw
+    }
+
+    It "writes ::add-mask:: to the console only, and only on GitHub Actions" {
+        $previousOut = [Console]::Out
+        $previousFlag = $env:GITHUB_ACTIONS
+        $writer = New-Object System.IO.StringWriter
+        try {
+            [Console]::SetOut($writer)
+            $env:GITHUB_ACTIONS = 'true'
+            $streams = Write-BcDevEnvMask -Value 's3cr3t' *>&1
+            $env:GITHUB_ACTIONS = $null
+            $streams += Write-BcDevEnvMask -Value 'other' *>&1
+        }
+        finally {
+            [Console]::SetOut($previousOut)
+            $env:GITHUB_ACTIONS = $previousFlag
+        }
+        $writer.ToString().Trim() | Should -Be '::add-mask::s3cr3t'
+        $streams | Should -BeNullOrEmpty
     }
 }
 
@@ -435,6 +491,16 @@ Describe "Get-BcDevEnvRunTestsArguments" {
         $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
         { Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' } | Should -Throw '*needs -AlToolPath*'
         { Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'webclient' } | Should -Throw
+    }
+
+    It "names the user and the password variable, never the password, for user name/password authentication" {
+        $app = [pscustomobject]@{ Id = 'i'; Name = 'n' }
+        $pass = [pscustomobject]@{ TestType = ''; Isolation = ''; RunnerId = 130450 }
+        $arguments = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r' -Executor 'altool' -AlToolPath 'a.dll' -UserName 'admin'
+        ($arguments -join ' ') | Should -BeLike '* --auth UserPassword --user admin --password-env BCDEVENV_ADMIN_PASSWORD'
+        $arguments | Should -Not -Contain '--password'
+        $windows = Get-BcDevEnvRunTestsArguments -ODataUrl 'u' -CompanyName 'c' -App $app -Pass $pass -ResultFile 'r'
+        $windows | Should -Not -Contain '--auth'
     }
 }
 
@@ -592,6 +658,19 @@ Describe "RunBcDevEnvPipeline action contract" {
             $action | Should -Match ('(?m)^  {0}:\s*$' -f [regex]::Escape($entry.Env))
             $action | Should -Match ('(?m)^\s+_{0}:\s+\$\{{\{{ inputs\.{0} \}}\}}' -f [regex]::Escape($entry.Env))
         }
+    }
+
+    It "builds a NavUserPassword container and passes the generated password only by variable name" {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../../../.github/actions/RunBcDevEnvPipeline/RunBcDevEnvPipeline.ps1')
+        $script | Should -Match ([regex]::Escape("'--credential-type', 'NavUserPassword'"))
+        $script | Should -Match 'New-BcDevEnvPassword'
+        $script | Should -Match 'Write-BcDevEnvMask -Value \$adminPassword'
+        $script | Should -Match ([regex]::Escape("'set-password', '--user', `$adminUser, '--password-env', `$passwordVariable"))
+        $script | Should -Match ([regex]::Escape("'-e', `$passwordVariable"))
+        $script | Should -Match ([regex]::Escape('Remove-Item -LiteralPath "Env:$passwordVariable"'))
+        $script | Should -Not -Match '::add-mask::'
+        $script | Should -Not -Match '--build-arg'
+        $script | Should -Not -Match '-e\s+"?\$?\w*=\$adminPassword'
     }
 }
 

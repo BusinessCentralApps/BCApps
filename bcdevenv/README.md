@@ -102,6 +102,7 @@ bcdevenv help
 | `list` | List environments and images | host |
 | `provision` | (inside image) restore `.bak`, register + configure the NST, license, bake-time apps | container build |
 | `serve` | (inside image) entrypoint: start SQL + NST and keep alive | container runtime |
+| `set-password` | (inside a running NavUserPassword container) set the SUPER user's password from an environment variable | container runtime |
 | `help [cmd]` | Usage | anywhere |
 
 Run `bcdevenv help <command>` for flags.
@@ -130,6 +131,23 @@ bcdevenv list
 bcdevenv stop --name bc1
 bcdevenv remove --name bc1 --purge-image
 ```
+
+**Authentication.** Images use Windows authentication unless `build-image
+--credential-type NavUserPassword` (`UserPassword` is accepted as the same) is given.
+Then provisioning also creates a SUPER user (`--admin-user`, default `admin`) with a
+random password that is never stored or printed, so the image holds no usable
+password; set the real one in the running container, passing the variable by name
+only, so that it is not on any command line, in the image or in `docker inspect`:
+
+```powershell
+$env:BCDEVENV_ADMIN_PASSWORD = '<password>'
+docker exec -e BCDEVENV_ADMIN_PASSWORD -u ContainerAdministrator bc1 C:\bcdevenv\cli\bcdevenv.exe set-password --user admin
+docker exec -e BCDEVENV_ADMIN_PASSWORD -u ContainerAdministrator bc1 C:\bcdevenv\cli\bcdevenv.exe run-tests --auth UserPassword --user admin --password-env BCDEVENV_ADMIN_PASSWORD ...
+```
+
+The provisioning Windows account stays a SUPER user either way: the management
+service, which `provision`, `install-app` and `set-password` use, always
+authenticates with Windows.
 
 Apps can instead be installed **at bake time** by passing `--app-file` to
 `build-image`. Because `install-app` is a standalone action, the same logic is
@@ -438,7 +456,11 @@ skip report also counts entries that matched no test in the run (stale, or outsi
 the selection; listed with `--verbose`).
 
 Run `bcdevenv help run-tests` for all flags (`--allow-failures`, `--extension`,
-`--test-codeunit`, `--auth`, …).
+`--test-codeunit`, `--auth`, …). `--auth` is `Windows` (default) or `UserPassword`
+(`NavUserPassword` is accepted as the same) with `--user` and the password from
+`--password-env <variable>` (default `BCDEVENV_ADMIN_PASSWORD`) or `--password`: the
+OData calls send it as Basic authentication and the AL tool gets it in
+`BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD`.
 
 ## BCApps CI pipeline
 
@@ -490,12 +512,25 @@ build mode it:
    Contoso demo data for `IntegrationTest`/`Uncategorized`; each call may take up to
    60 minutes, `build-image --company-codeunit-timeout <minutes>`, instead of the
    management API's 600-second default, and is not retried), maps the build account
-   and, with Windows authentication, the server's own account (`NT AUTHORITY\NETWORK
-   SERVICE`, which the API tests' default-credential calls to the server
-   authenticate as) to SUPER users, and `start` runs the container (the server's URL
+   to a SUPER user and creates the SUPER user `admin`: the container uses
+   **NavUserPassword** authentication (`build-image --credential-type NavUserPassword`),
+   like AL-Go's `Run-AlPipeline` containers. The password is generated for each run
+   (32 random characters), registered with `::add-mask::` (written to the runner's own
+   output, so it is not in `BuildOutput.txt` either) and kept in the action process's
+   environment; it is never in the image (provisioning gives `admin` a discarded random
+   password), on a command line or in the container's configuration. `start` runs the
+   container (the server's URL
    reservations include the report rendering side service's port 7084 and the
    management API port, so the reporting service can start and tests can render
-   reports);
+   reports), `bcdevenv set-password` sets the password in the running container
+   (`docker exec -e BCDEVENV_ADMIN_PASSWORD`, which passes the variable by name), and
+   every later call authenticates as `admin`: the OData readiness check and the
+   BcDevEnvTestRunner calls with Basic authentication, the AL tool with
+   `BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD`. The API tests' calls to the server's own
+   endpoints authenticate with the test user's name and a web service access key
+   (`Microsoft Test Auth Provider`, 131022, which applies to on-premises
+   NavUserPassword), as in AL-Go's containers, so the server's own account is no longer
+   mapped to a user (that is only done with Windows authentication);
 4. selects the test apps like the project's `.AL-Go\RunTestsInBcContainer.ps1`
    override (the test-type bucket from `build\projects.json`/`build\groups.json` when
    the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
@@ -644,16 +679,16 @@ runner. Known cases, from the CI failures (cause not verified for each test):
   with "Queue underflow", where the test expects an error first; no cause in the runner
   has been found.
 
-The container's client services use Windows authentication, while AL-Go's
-`Run-AlPipeline` uses `NavUserPassword` by default. `User Permissions
-Library.CreateSuperUser` (System Application Test Library) gives an on-premises user
-the Windows account `SID()`, which under Windows authentication is the account of the
-user that runs the tests, so 132925 (`Plan Configuration
-E2E Test.CustomizePermissionSetAdd`) fails with "The same Windows Account can be
-connected to only one Business Central user." It passed before the reset cleared
-the Environment Info testability flags, because an earlier codeunit had left
-`SetTestabilitySoftwareAsAService(true)` set and the library skips the Windows account
-on SaaS.
+The container's client services use `NavUserPassword` authentication, like AL-Go's
+`Run-AlPipeline`. Under Windows authentication (the previous setting) `User Permissions
+Library.CreateSuperUser` (System Application Test Library) gave an on-premises user
+the Windows account `SID()` of the user that runs the tests, so 132925 (`Plan
+Configuration E2E Test.CustomizePermissionSetAdd`) failed with "The same Windows
+Account can be connected to only one Business Central user." (it had passed while an
+earlier codeunit left `SetTestabilitySoftwareAsAService(true)` set, because the
+library skips the Windows account on SaaS). With the tests signed in as the
+NavUserPassword user `admin`, as in AL-Go's containers, 132925 is expected to pass;
+not yet verified in CI.
 
 A generic fix for single-instance state would be one AL tool invocation per test
 codeunit, so that every codeunit gets a new session. It is not implemented: every
@@ -747,6 +782,7 @@ works from a standalone checkout (override with `BCDEVENV_TOOL_ROOT`).
 | `BCDEVENV_MGMT_DIR` | Management-module dir baked into the container image |
 | `BCDEVENV_SERVICE_FOLDER` / `BCDEVENV_WEBCLIENT_FOLDER` | Override staged binaries |
 | `BCDEVENV_TOOL_ROOT` | Override the tool-root autodetection for `build-image` |
+| `BCDEVENV_ADMIN_PASSWORD` | Password of the NavUserPassword user, read by `set-password` and `run-tests --auth UserPassword` (default `--password-env`) |
 
 ## Not runnable end-to-end in every environment
 

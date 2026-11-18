@@ -16,6 +16,14 @@ public sealed class BuildManifest
     public string BakFile { get; set; } = "";
     public string? LicenseFile { get; set; }
     public string CredentialType { get; set; } = "Windows";
+
+    /// <summary>
+    /// SUPER user provisioned for NavUserPassword images (null for Windows). The manifest never holds a
+    /// password: provision sets a random one that is discarded, and 'bcdevenv set-password' sets the real
+    /// one in the running container.
+    /// </summary>
+    public string? AdminUserName { get; set; }
+
     public List<string> AppFiles { get; set; } = new();
 
     /// <summary>Company the test context is provisioned in; null = <see cref="DefaultCompanyName"/>.</summary>

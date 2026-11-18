@@ -405,8 +405,17 @@ public sealed class NavTestService
     private HttpClient CreateClient(RunOptions options)
     {
         var client = _handler != null ? new HttpClient(_handler, disposeHandler: false) : NewClient(options);
+        client.DefaultRequestHeaders.Authorization = BasicAuthorization(options);
         client.Timeout = TimeSpan.FromMinutes(Math.Max(1, options.TimeoutMinutes));
         return client;
+    }
+
+    /// <summary>The Basic header of UserPassword (NavUserPassword) authentication; null for Windows.</summary>
+    public static AuthenticationHeaderValue? BasicAuthorization(RunOptions o)
+    {
+        if (!AuthenticationNames.IsUserPassword(o.Authentication) || string.IsNullOrEmpty(o.UserName)) return null;
+        var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{o.UserName}:{o.Password}"));
+        return new AuthenticationHeaderValue("Basic", token);
     }
 
     /// <summary>
@@ -474,16 +483,10 @@ public sealed class NavTestService
     private HttpClient NewClient(RunOptions o)
     {
         var handler = new HttpClientHandler();
-        if (string.Equals(o.Authentication, "Windows", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(o.Authentication, AuthenticationNames.Windows, StringComparison.OrdinalIgnoreCase))
             handler.UseDefaultCredentials = true;
 
         var client = new HttpClient(handler, disposeHandler: true);
-        if (string.Equals(o.Authentication, "UserPassword", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrEmpty(o.UserName))
-        {
-            var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{o.UserName}:{o.Password}"));
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", token);
-        }
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/xml"));
         return client;

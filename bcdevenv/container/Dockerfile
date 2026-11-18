@@ -16,7 +16,8 @@
 #   apps\*.app                 - optional bake-time app packages
 #   license\*.bclicense        - license (required when apps are baked into an empty create-env DB)
 #   system32\*                 - optional DLLs copied into System32 when missing (e.g. t2embed.dll)
-#   build-manifest.json        - DB name, country, instance, credential type, apps
+#   build-manifest.json        - DB name, country, instance, credential type, admin user name
+#                                (never a password), apps
 #   cli\*                      - the self-contained bcdevenv CLI (provision + serve)
 #
 # Windows containers only. The base image OS version must match the host kernel

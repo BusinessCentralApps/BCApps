@@ -66,7 +66,7 @@ public static class ServeCommand
         Thread.Sleep(TimeSpan.FromSeconds(5));
     }
 
-    private static void WaitUntilRunning(NavServerService server, string instance, TimeSpan timeout)
+    internal static void WaitUntilRunning(NavServerService server, string instance, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)

@@ -1350,23 +1350,45 @@ function ConvertTo-BcDevEnvEncodedScript {
 .SYNOPSIS
     Returns the Windows PowerShell script that waits until the container's OData endpoint serves
     (and, when -RequiredText is given, until $metadata contains it).
+.DESCRIPTION
+    Without -UserName the script authenticates with Windows (default credentials). With -UserName
+    (a NavUserPassword container) it sends Basic authentication with that user and the password the
+    container process reads from the environment variable -PasswordVariable (pass it with a name-only
+    'docker exec -e'); the script holds only the variable name, never the password.
 #>
 function Get-BcDevEnvReadinessScript {
     param(
         [Parameter(Mandatory = $true)] [string] $ODataUrl,
         [AllowEmptyString()] [string] $RequiredText = '',
         [int] $Attempts = 60,
-        [int] $DelaySeconds = 10
+        [int] $DelaySeconds = 10,
+        [AllowEmptyString()] [string] $UserName = '',
+        [string] $PasswordVariable = 'BCDEVENV_ADMIN_PASSWORD'
     )
 
     $url = ConvertTo-BcDevEnvPowerShellLiteral ($ODataUrl.TrimEnd('/') + '/$metadata')
     $required = ConvertTo-BcDevEnvPowerShellLiteral $RequiredText
+    if ([string]::IsNullOrWhiteSpace($UserName)) {
+        $authentication = ''
+        $request = "Invoke-WebRequest -UseDefaultCredentials -UseBasicParsing -Uri $url -TimeoutSec 30"
+    }
+    else {
+        if ($PasswordVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid password environment variable name '$PasswordVariable'." }
+        $user = ConvertTo-BcDevEnvPowerShellLiteral $UserName
+        $authentication = @"
+`$password = `$env:$PasswordVariable
+if (-not `$password) { Write-Host 'The environment variable $PasswordVariable with the password is not set in the container.'; exit 1 }
+`$headers = @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($user + ':' + `$password)) }
+
+"@
+        $request = "Invoke-WebRequest -Headers `$headers -UseBasicParsing -Uri $url -TimeoutSec 30"
+    }
     return @"
 `$ErrorActionPreference = 'Stop'
-`$lastError = 'no response'
+$authentication`$lastError = 'no response'
 for (`$i = 1; `$i -le $Attempts; `$i++) {
   try {
-    `$r = Invoke-WebRequest -UseDefaultCredentials -UseBasicParsing -Uri $url -TimeoutSec 30
+    `$r = $request
     if (`$r.StatusCode -eq 200) {
       if (-not $required -or `$r.Content.Contains($required)) { Write-Host "OData is serving (attempt `$i)."; exit 0 }
       `$lastError = 'metadata does not contain ' + $required
@@ -1377,6 +1399,57 @@ for (`$i = 1; `$i -le $Attempts; `$i++) {
 Write-Host "OData did not become ready: `$lastError"
 exit 1
 "@
+}
+
+<#
+.SYNOPSIS
+    Returns a random password for the container's NavUserPassword user: -Length characters with at least
+    one upper case letter, lower case letter, digit and symbol (the server's password policy). The symbols
+    (- _ . !) need no quoting in PowerShell, cmd or docker arguments. Uses a cryptographic random number
+    generator; works in Windows PowerShell 5.1 and PowerShell 7.
+#>
+function New-BcDevEnvPassword {
+    param([ValidateRange(8, 128)] [int] $Length = 32)
+
+    $classes = @('ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnopqrstuvwxyz', '23456789', '-_.!')
+    $all = -join $classes
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 4
+        $nextIndex = {
+            param([int] $Count)
+            $limit = 4294967296L - (4294967296L % $Count)
+            do {
+                $rng.GetBytes($bytes)
+                $value = [long][System.BitConverter]::ToUInt32($bytes, 0)
+            } while ($value -ge $limit)
+            return [int]($value % $Count)
+        }
+        $chars = New-Object 'System.Collections.Generic.List[char]'
+        foreach ($class in $classes) { $chars.Add($class[(& $nextIndex $class.Length)]) }
+        while ($chars.Count -lt $Length) { $chars.Add($all[(& $nextIndex $all.Length)]) }
+        for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+            $j = & $nextIndex ($i + 1)
+            $swap = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $swap
+        }
+        return -join $chars
+    }
+    finally { $rng.Dispose() }
+}
+
+<#
+.SYNOPSIS
+    Registers -Value as a secret with GitHub Actions (::add-mask::), so that the runner masks it in the log.
+.DESCRIPTION
+    Writes straight to the process's standard output, not through PowerShell's streams: the action tees
+    the script's streams into BuildOutput.txt, which is uploaded as an artifact where the runner's masking
+    does not apply. Does nothing outside GitHub Actions.
+#>
+function Write-BcDevEnvMask {
+    param([Parameter(Mandatory = $true)] [string] $Value)
+    if ($env:GITHUB_ACTIONS -ne 'true') { return }
+    [Console]::Out.WriteLine("::add-mask::$Value")
+    [Console]::Out.Flush()
 }
 
 <#
@@ -1541,6 +1614,9 @@ exit 1
     development endpoint on -DevPort, within -AppTimeoutMinutes for the app and pass. -PermissionsMock
     selects the state reset before every test codeunit (permissions mock started or stopped);
     -StateProbe adds the diagnostic --state-probe on (left out when off, the CLI default).
+    -UserName (a NavUserPassword container) adds --auth UserPassword --user <name> --password-env
+    <-PasswordVariable>: run-tests reads the password from that environment variable of its own
+    process, so the password never appears in the arguments.
 #>
 function Get-BcDevEnvRunTestsArguments {
     param(
@@ -1559,7 +1635,9 @@ function Get-BcDevEnvRunTestsArguments {
         [string] $ServerInstance = 'BC',
         [int] $AppTimeoutMinutes = 240,
         [bool] $PermissionsMock = $true,
-        [bool] $StateProbe = $false
+        [bool] $StateProbe = $false,
+        [AllowEmptyString()] [string] $UserName = '',
+        [string] $PasswordVariable = 'BCDEVENV_ADMIN_PASSWORD'
     )
 
     $arguments = @(
@@ -1593,6 +1671,9 @@ function Get-BcDevEnvRunTestsArguments {
             '--permissions-mock', $(if ($PermissionsMock) { 'on' } else { 'off' })
         )
         if ($StateProbe) { $arguments += @('--state-probe', 'on') }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($UserName)) {
+        $arguments += @('--auth', 'UserPassword', '--user', $UserName, '--password-env', $PasswordVariable)
     }
     return $arguments
 }

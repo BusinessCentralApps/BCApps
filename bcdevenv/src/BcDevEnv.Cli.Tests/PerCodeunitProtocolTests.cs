@@ -20,6 +20,8 @@ internal sealed class FakeRunnerHandler : HttpMessageHandler
 
     public List<(string Action, string Url, JsonElement Body)> Requests { get; } = new();
 
+    public List<string?> Authorizations { get; } = new();
+
     public HttpResponseMessage Respond(string action, JsonElement body) => _respond(action, body);
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -29,6 +31,7 @@ internal sealed class FakeRunnerHandler : HttpMessageHandler
         var action = path[(path.LastIndexOf('_') + 1)..];
         var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync(cancellationToken).Result).RootElement.Clone();
         Requests.Add((action, url, body));
+        Authorizations.Add(request.Headers.Authorization?.ToString());
         return Task.FromResult(_respond(action, body));
     }
 
@@ -287,6 +290,70 @@ public class PerCodeunitProtocolTests
         Assert.Equal(new[] { NavTestService.PrepareAction, NavTestService.RunCodeunitAction, NavTestService.EndTestRunAction },
             ends.Requests.Select(r => r.Action));
         Assert.Equal(NavTestService.EndTestRunAction, cannotEnd.Requests.Last().Action);
+    }
+
+    [Fact]
+    public void UserPassword_sends_basic_authentication_on_every_runner_call_with_the_password_from_the_environment()
+    {
+        using var dir = new TempDir();
+        var variable = "BCDEVENV_TEST_PW_" + Guid.NewGuid().ToString("N");
+        Environment.SetEnvironmentVariable(variable, "p@ss:wörd");
+        try
+        {
+            var handler = WithPrepare(new FakeRunnerHandler((_, _) =>
+                    FakeRunnerHandler.Value(FakeRunnerHandler.XUnit(50001, "Alpha Tests", ("A", "Success", null)))),
+                FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0)));
+
+            Assert.Equal(0, RunCommand(handler, "--protocol", "per-codeunit", "--auth", "NavUserPassword", "--user", "admin",
+                "--password-env", variable, "--result-file", Path.Combine(dir.Path, "j.xml")));
+
+            var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:p@ss:wörd"));
+            Assert.Equal(3, handler.Authorizations.Count);
+            Assert.All(handler.Authorizations, a => Assert.Equal(expected, a));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    [Fact]
+    public void Windows_authentication_sends_no_authorization_header()
+    {
+        using var dir = new TempDir();
+        var handler = WithPrepare(new FakeRunnerHandler((_, _) =>
+                FakeRunnerHandler.Value(FakeRunnerHandler.XUnit(50001, "Alpha Tests", ("A", "Success", null)))),
+            FakeRunnerHandler.Plan((10000, 50001, "Alpha Tests", true, 1, 0)));
+
+        Assert.Equal(0, RunCommand(handler, "--protocol", "per-codeunit", "--result-file", Path.Combine(dir.Path, "j.xml")));
+        Assert.All(handler.Authorizations, Assert.Null);
+    }
+
+    [Fact]
+    public void UserPassword_credentials_come_from_the_options_or_the_named_variable()
+    {
+        static ParsedArgs Args(params string[] args) => ParsedArgs.Parse(args, new HashSet<string>());
+        var variable = "BCDEVENV_TEST_PW_" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(("Windows", (string?)null, (string?)null), RunTestsCommand.ResolveCredentials(Args()));
+        Assert.Equal(("UserPassword", "admin", "x"),
+            RunTestsCommand.ResolveCredentials(Args("--auth", "userpassword", "--user", " admin ", "--password", "x")));
+        Assert.Contains("--user", Assert.Throws<BcDevEnvException>(() =>
+            RunTestsCommand.ResolveCredentials(Args("--auth", "UserPassword", "--password", "x"))).Message);
+        Assert.Contains(variable, Assert.Throws<BcDevEnvException>(() =>
+            RunTestsCommand.ResolveCredentials(Args("--auth", "UserPassword", "--user", "admin", "--password-env", variable))).Message);
+        Assert.Throws<BcDevEnvException>(() => RunTestsCommand.ResolveCredentials(Args("--auth", "Basic")));
+
+        Environment.SetEnvironmentVariable(variable, "from-env");
+        try
+        {
+            Assert.Equal(("UserPassword", "admin", "from-env"),
+                RunTestsCommand.ResolveCredentials(Args("--auth", "NavUserPassword", "--user", "admin", "--password-env", variable)));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
     }
 
     [Fact]

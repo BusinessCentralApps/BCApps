@@ -41,6 +41,7 @@ try
         "build-image" => BuildImageCommand.Run(parsed),
         "provision" => ProvisionCommand.Run(parsed),
         "serve" => ServeCommand.Run(parsed),
+        "set-password" => SetPasswordCommand.Run(parsed),
         "start" => LifecycleCommands.Start(parsed),
         "stop" => LifecycleCommands.Stop(parsed),
         "remove" => LifecycleCommands.Remove(parsed),

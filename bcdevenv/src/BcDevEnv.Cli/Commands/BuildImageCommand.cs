@@ -34,7 +34,8 @@ public static class BuildImageCommand
 
         var dbName = manifest?.DatabaseName ?? Path.GetFileNameWithoutExtension(bak);
         var serverInstance = a.GetOr("server-instance", manifest?.ServerInstance ?? "BC");
-        var credentialType = a.GetOr("credential-type", "Windows");
+        var credentialType = AuthenticationNames.ServerCredentialType(a.Get("credential-type"));
+        var adminUserName = AdminUserName(credentialType, a.Get("admin-user"));
         var baseImage = a.GetOr("base-image", DefaultBaseImage);
         var tag = a.Get("tag") ?? $"bcdevenv:{platformVersion}-{country}".ToLowerInvariant().Replace('.', '_');
         var registry = a.Get("registry");
@@ -121,6 +122,7 @@ public static class BuildImageCommand
             BakFile = bakLeaf,
             LicenseFile = licenseLeaf,
             CredentialType = credentialType,
+            AdminUserName = adminUserName,
             AppFiles = appLeaves,
             CompanyName = a.Get("company"),
             EvaluationCompany = a.Flag("evaluation-company"),
@@ -144,6 +146,21 @@ public static class BuildImageCommand
             Log.Success($"Pushed '{tag}'.");
         }
         return 0;
+    }
+
+    /// <summary>
+    /// The SUPER user a NavUserPassword image gets (--admin-user, default admin); null for Windows
+    /// images, where --admin-user is an error.
+    /// </summary>
+    public static string? AdminUserName(string credentialType, string? adminUser)
+    {
+        if (!AuthenticationNames.IsUserPassword(credentialType))
+        {
+            if (!string.IsNullOrWhiteSpace(adminUser))
+                throw new BcDevEnvException("--admin-user needs --credential-type NavUserPassword.");
+            return null;
+        }
+        return string.IsNullOrWhiteSpace(adminUser) ? AuthenticationNames.DefaultAdminUserName : adminUser.Trim();
     }
 
     /// <summary>Files from the tool's container folder that the Dockerfile COPYs from the context root.</summary>

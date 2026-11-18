@@ -121,9 +121,78 @@ public class PipelineSupportTests
     [InlineData("windows", "ContainerUser", "NT AUTHORITY\\NETWORK SERVICE")]
     [InlineData("Windows", "NT AUTHORITY\\NETWORK SERVICE", null)]
     [InlineData("NavUserPassword", "ContainerAdministrator", null)]
+    [InlineData("UserPassword", "ContainerAdministrator", null)]
     public void Server_account_is_mapped_to_a_user_only_with_windows_authentication(string credentialType, string account, string? expected)
     {
         Assert.Equal(expected, ProvisionCommand.ServerServiceAccountUser(credentialType, account));
+    }
+
+    [Theory]
+    [InlineData(null, "Windows", "Windows")]
+    [InlineData(" windows ", "Windows", "Windows")]
+    [InlineData("NavUserPassword", "NavUserPassword", "UserPassword")]
+    [InlineData("userpassword", "NavUserPassword", "UserPassword")]
+    public void Credential_type_and_auth_accept_both_user_password_names(string? value, string server, string client)
+    {
+        Assert.Equal(server, AuthenticationNames.ServerCredentialType(value));
+        Assert.Equal(client, AuthenticationNames.ClientAuthentication(value));
+    }
+
+    [Fact]
+    public void Unknown_authentication_names_are_rejected()
+    {
+        Assert.Contains("--credential-type", Assert.Throws<BcDevEnvException>(() => AuthenticationNames.ServerCredentialType("AccessControlService")).Message);
+        Assert.Contains("--auth", Assert.Throws<BcDevEnvException>(() => AuthenticationNames.ClientAuthentication("Basic")).Message);
+    }
+
+    [Fact]
+    public void Random_passwords_have_every_character_class_and_differ()
+    {
+        var passwords = Enumerable.Range(0, 50).Select(_ => AuthenticationNames.NewRandomPassword()).ToList();
+
+        Assert.All(passwords, p =>
+        {
+            Assert.Equal(32, p.Length);
+            Assert.Contains(p, char.IsUpper);
+            Assert.Contains(p, char.IsLower);
+            Assert.Contains(p, char.IsDigit);
+            Assert.Contains(p, c => "-_.!".Contains(c));
+        });
+        Assert.Equal(passwords.Count, passwords.Distinct().Count());
+        Assert.Equal(8, AuthenticationNames.NewRandomPassword(8).Length);
+        Assert.Throws<ArgumentOutOfRangeException>(() => AuthenticationNames.NewRandomPassword(7));
+    }
+
+    [Fact]
+    public void Admin_user_is_only_created_for_user_password_images()
+    {
+        Assert.Null(BuildImageCommand.AdminUserName("Windows", null));
+        Assert.Contains("--credential-type NavUserPassword",
+            Assert.Throws<BcDevEnvException>(() => BuildImageCommand.AdminUserName("Windows", "admin")).Message);
+        Assert.Equal("admin", BuildImageCommand.AdminUserName("NavUserPassword", null));
+        Assert.Equal("tester", BuildImageCommand.AdminUserName("NavUserPassword", " tester "));
+
+        Assert.Null(ProvisionCommand.AdminUser("Windows", "admin"));
+        Assert.Equal("admin", ProvisionCommand.AdminUser("NavUserPassword", null));
+        Assert.Equal("tester", ProvisionCommand.AdminUser("NavUserPassword", "tester"));
+    }
+
+    [Fact]
+    public void Set_password_user_comes_from_the_option_or_the_image_manifest()
+    {
+        using var dir = new TempDir();
+        var path = Path.Combine(dir.Path, "build-manifest.json");
+        new BuildManifest { CredentialType = "NavUserPassword", AdminUserName = "tester" }.Save(path);
+        var manifest = BuildManifest.Load(path);
+
+        Assert.Equal("tester", manifest.AdminUserName);
+        using (var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)))
+            Assert.DoesNotContain(json.RootElement.EnumerateObject(), p => p.Name.Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("tester", SetPasswordCommand.ResolveUserName(null, manifest));
+        Assert.Equal("other", SetPasswordCommand.ResolveUserName("other", manifest));
+        Assert.Equal("admin", SetPasswordCommand.ResolveUserName(null, null));
+        Assert.Contains("--credential-type NavUserPassword", Assert.Throws<BcDevEnvException>(() =>
+            SetPasswordCommand.ResolveUserName(null, new BuildManifest { CredentialType = "Windows" })).Message);
     }
 
     [Fact]

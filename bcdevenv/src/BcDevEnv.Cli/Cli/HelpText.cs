@@ -30,6 +30,7 @@ COMMANDS (host)
 COMMANDS (inside the container image)
   provision      Restore .bak, register + configure the NST, license, bake-time apps
   serve          Container entrypoint: start SQL + NST and keep alive
+  set-password   Set the NavUserPassword user's password from an environment variable
 
 Run 'bcdevenv help <command>' for command-specific options.
 """;
@@ -101,8 +102,12 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
   --extension <guid>        Limit the run to a single extension (app id)
   --test-codeunit <filter>  Limit the run to a codeunit id / range
   --company <name>          Company to run in
-  --auth <Windows|UserPassword>  Authentication (default: Windows)
-  --user <name> / --password <pw> Credentials for UserPassword auth
+  --auth <a>                Windows (default) or UserPassword (NavUserPassword is the same)
+  --user <name>             User for UserPassword auth (required with it)
+  --password <pw>           Password for UserPassword auth; prefer --password-env
+  --password-env <name>     Environment variable holding the password when --password is
+                            not given (default: BCDEVENV_ADMIN_PASSWORD); keeps it off the
+                            command line. The AL tool gets it in BC_SERVER_PASSWORD
   --timeout-minutes <n>     Runner HTTP timeout per call (default: 30)
 
   PER-CODEUNIT PROTOCOL (PrepareTests once, then one RunCodeunit call per test codeunit)
@@ -198,7 +203,12 @@ build-image - Stage the .bak + platform Service/WebClient binaries (from the
   --server-instance <name>  NST instance baked into the image (default: BC)
   --tag <tag>               Image tag (default: bcdevenv:<version>-<country>)
   --base-image <ref>        Base image (default: mcr.microsoft.com/windows/servercore:ltsc2022)
-  --credential-type <t>     Windows | NavUserPassword (default: Windows)
+  --credential-type <t>     ClientServicesCredentialType: Windows (default) or NavUserPassword
+                            (UserPassword is the same). NavUserPassword also creates a SUPER
+                            user (--admin-user) whose password is random and discarded at
+                            build time; set the real one in the running container with
+                            'bcdevenv set-password'. No password is stored in the image
+  --admin-user <name>       NavUserPassword SUPER user (default: admin)
   --license <path>          License file to bake (or BCDEVENV_LICENSE). Required to bake
                             apps into the empty create-env database, which holds no
                             license - e.g. the CRONUS license (Cronus.bclicense) of a
@@ -226,11 +236,25 @@ start - Run a container from a built image.
 provision - (container build step) Restore the staged .bak, register + configure
             the NST from baked binaries, import the license, install any
             bake-time apps, then create the test company + SUPER user(s) (the
-            current account and, with Windows authentication, the server's
-            NETWORK SERVICE account) and run the requested company codeunits.
+            current Windows account, which the management service uses; with
+            Windows authentication the server's NETWORK SERVICE account; with
+            NavUserPassword the manifest's admin user, with a random password
+            that is discarded) and run the requested company codeunits.
             Reads build-manifest.json from --context (or cwd).
 """,
         ["serve"] = "serve - (container entrypoint) Start SQL + the NST and keep the container alive.",
+        ["set-password"] = """
+set-password - (inside a running NavUserPassword container) Set the password of the
+               image's SUPER user. Waits until the server instance is running.
+               Pass the variable by name only ('docker exec -e BCDEVENV_ADMIN_PASSWORD
+               ...'), so the password stays out of the command line, the image and
+               'docker inspect'. Never logs the password.
+
+  --user <name>             User (default: the image's admin user, else admin)
+  --password-env <name>     Environment variable holding the password
+                            (default: BCDEVENV_ADMIN_PASSWORD)
+  --server-instance <name>  NST instance (default: BCDEVENV_INSTANCE / BC)
+""",
     };
 
     public static string For(string? command)

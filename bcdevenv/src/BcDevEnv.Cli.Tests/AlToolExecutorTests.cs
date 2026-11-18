@@ -1014,16 +1014,19 @@ public class AlToolExecutorTests
         Assert.Equal(TestOutcome.Failed, Method(run, 50002, "T").Outcome);
     }
 
-    [Fact]
-    public void UserPassword_credentials_are_passed_in_the_environment()
+    [Theory]
+    [InlineData("UserPassword")]
+    [InlineData("NavUserPassword")]
+    public void UserPassword_credentials_are_passed_in_the_environment(string authentication)
     {
         var tool = new FakeAlTool((_, _) => FakeAlTool.Results((50001, "A", "passed", null)));
         new AlToolTestRunner(tool.Execute).Run(Suite(Prepared(50001, "Alpha", true, Pending("A"))),
-            Options() with { Authentication = "UserPassword", UserName = "admin", Password = "secret" });
+            Options() with { Authentication = authentication, UserName = "admin", Password = "secret" });
 
         var call = Assert.Single(tool.Calls);
         Assert.Equal("admin", call.Environment!["BC_SERVER_USERNAME"]);
         Assert.Equal("secret", call.Environment["BC_SERVER_PASSWORD"]);
+        Assert.Equal("UserPassword", call.Arguments[call.Arguments.ToList().IndexOf("--authentication") + 1]);
         Assert.DoesNotContain("secret", call.Arguments);
     }
 

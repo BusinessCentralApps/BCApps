@@ -435,7 +435,7 @@ public sealed class AlToolTestRunner
         File.WriteAllText(groupsFile, SerializeTestGroups(WithStateResets(batch.Select(s => s.Group!).ToList(), resetIds, options.StateProbe)));
         var (fileName, arguments) = BuildCommand(options, groupsFile);
         Dictionary<string, string>? environment = null;
-        if (string.Equals(options.Authentication, "UserPassword", StringComparison.OrdinalIgnoreCase))
+        if (AuthenticationNames.IsUserPassword(options.Authentication))
             environment = new Dictionary<string, string>
             {
                 ["BC_SERVER_USERNAME"] = options.UserName ?? "",
@@ -611,7 +611,7 @@ public sealed class AlToolTestRunner
             "--server", options.Server,
             "--serverinstance", options.ServerInstance,
             "--port", options.Port.ToString(CultureInfo.InvariantCulture),
-            "--authentication", options.Authentication,
+            "--authentication", AuthenticationNames.ClientAuthentication(options.Authentication),
         });
         if (!string.IsNullOrWhiteSpace(options.Company))
             arguments.AddRange(new[] { "--company", options.Company! });

@@ -5,6 +5,9 @@ description: >-
   bcdevenv CLI, creates an empty-database Business Central container from the BCPlatform version in
   build/Packages.json, installs the project's apps and test apps (compiled by CompileApps) with their
   dependencies, and runs the tests while honoring the DisabledTests folders (src/DisabledTests).
+  The container uses NavUserPassword authentication with the SUPER user admin, whose password is
+  generated for each run, masked, set in the running container (bcdevenv set-password, the variable
+  passed by name with docker exec -e) and never stored in the image; no secret is needed.
 inputs:
   shell:
     description: Accepted for compatibility with RunPipeline. The pipeline always runs in pwsh.

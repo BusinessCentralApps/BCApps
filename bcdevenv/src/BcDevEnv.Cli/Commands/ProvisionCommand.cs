@@ -51,7 +51,8 @@ public static class ProvisionCommand
         server.SetConfiguration(manifest.ServerInstance, "ODataServicesEnabled", true);
         server.SetConfiguration(manifest.ServerInstance, "ApiServicesEnabled", true);
         server.SetConfiguration(manifest.ServerInstance, "UsePermissionSetsFromExtensions", true);
-        server.SetConfiguration(manifest.ServerInstance, "ClientServicesCredentialType", manifest.CredentialType);
+        server.SetConfiguration(manifest.ServerInstance, "ClientServicesCredentialType",
+            AuthenticationNames.ServerCredentialType(manifest.CredentialType));
 
         // Test-run settings (as AL-Go's NewBcContainer sets them for test containers) and a per-call
         // OData ceiling high enough for the largest test codeunit. Best-effort: older platforms may
@@ -157,14 +158,17 @@ public static class ProvisionCommand
     }
 
     /// <summary>
-    /// Creates the company + SUPER user the live OData test run needs, then runs the requested
+    /// Creates the company + SUPER user(s) the live test run needs, then runs the requested
     /// company codeunits (Company-Initialize, demo data) in order. Every step is strict: tests run
     /// in a missing or half-initialized company would only fail later with misleading errors.
+    /// The Windows account that provisions is always a SUPER user: the management service (which
+    /// runs the company codeunits) authenticates with Windows whatever ClientServicesCredentialType is.
     /// </summary>
     private static void ProvisionTestContext(NavServerService server, BuildManifest manifest)
     {
         var instance = manifest.ServerInstance;
         var companyName = manifest.EffectiveCompanyName;
+        var credentialType = AuthenticationNames.ServerCredentialType(manifest.CredentialType);
         server.CreateCompany(instance, companyName, manifest.EvaluationCompany);
 
         var account = Environment.UserName;
@@ -172,7 +176,17 @@ public static class ProvisionCommand
             throw new BcDevEnvException("Cannot create the SUPER user for the test run: the current Windows account name is empty.");
         server.CreateSuperUser(instance, account);
 
-        var serviceAccount = ServerServiceAccountUser(manifest.CredentialType, account);
+        var adminUser = AdminUser(credentialType, manifest.AdminUserName);
+        if (adminUser is not null)
+        {
+            // The image must not hold a usable password: this random one is never stored or printed,
+            // so the user can sign in only after 'bcdevenv set-password' sets the real one at run time.
+            using var throwaway = AuthenticationNames.ToSecureString(AuthenticationNames.NewRandomPassword());
+            server.CreateSuperUser(instance, adminUser, throwaway);
+            Log.Info($"Created the NavUserPassword SUPER user '{adminUser}' (no usable password until 'bcdevenv set-password').");
+        }
+
+        var serviceAccount = ServerServiceAccountUser(credentialType, account);
         if (serviceAccount is not null)
         {
             try
@@ -190,6 +204,16 @@ public static class ProvisionCommand
             server.InvokeCodeunit(instance, companyName, call.CodeunitId, call.MethodName, manifest.EffectiveCompanyCodeunitTimeout);
     }
 
+    /// <summary>
+    /// The NavUserPassword SUPER user to create (the manifest's, default admin), or null with Windows
+    /// authentication.
+    /// </summary>
+    public static string? AdminUser(string credentialType, string? manifestAdminUser)
+    {
+        if (!AuthenticationNames.IsUserPassword(credentialType)) return null;
+        return string.IsNullOrWhiteSpace(manifestAdminUser) ? AuthenticationNames.DefaultAdminUserName : manifestAdminUser.Trim();
+    }
+
     /// <summary>Windows account the server instance runs as (see <see cref="NavServerService"/>).</summary>
     public const string ServerServiceAccount = "NT AUTHORITY\\NETWORK SERVICE";
 
@@ -197,11 +221,13 @@ public static class ProvisionCommand
     /// The server account to map to a SUPER user in addition to the test-run account, or null.
     /// With Windows authentication, AL code that calls the server's own endpoints with default
     /// network credentials (e.g. the API test library's HttpClient.UseDefaultNetworkWindowsAuthentication)
-    /// authenticates as the account the server runs as, which must therefore be a user.
+    /// authenticates as the account the server runs as, which must therefore be a user. With
+    /// NavUserPassword the API test library authenticates with the user name and web service access
+    /// key of the current user instead (Microsoft Test Auth Provider), so no service account user is needed.
     /// </summary>
     public static string? ServerServiceAccountUser(string credentialType, string testRunAccount)
     {
-        if (!string.Equals(credentialType, "Windows", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!string.Equals(credentialType, AuthenticationNames.Windows, StringComparison.OrdinalIgnoreCase)) return null;
         if (string.Equals(testRunAccount, ServerServiceAccount, StringComparison.OrdinalIgnoreCase)) return null;
         return ServerServiceAccount;
     }
