@@ -1,0 +1,4 @@
+<Project>
+  <!-- Halts inheritance of the enlistment-root Directory.Build.targets. See
+       Directory.Build.props in this folder for why bcdevenv is isolated. -->
+</Project>

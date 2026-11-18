@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Match the CLI: the referenced project + PowerShell SDK are win-x64 only. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Microsoft.Data.SqlClient (pulled transitively) requires globalization. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The tests drive the real bcdevenv CLI: as a library (the index/artifact helpers) and as the
+         built executable run per platform version (see CliRunner). -->
+    <ProjectReference Include="..\BcDevEnv.Cli\BcDevEnv.Cli.csproj" />
+  </ItemGroup>
+
+</Project>

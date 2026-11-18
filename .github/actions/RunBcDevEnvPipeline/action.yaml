@@ -1,0 +1,172 @@
+name: Run bcdevenv pipeline
+author: BusinessCentralApps
+description: >-
+  Replaces microsoft/AL-Go/Actions/RunPipeline for workspace-compiled AL-Go projects. Builds the
+  bcdevenv CLI, creates an empty-database Business Central container from the BCPlatform version in
+  build/Packages.json, installs the project's apps and test apps (compiled by CompileApps) with their
+  dependencies, and runs the tests while honoring the DisabledTests folders (src/DisabledTests).
+  The container uses NavUserPassword authentication with the SUPER user admin, whose password is
+  generated for each run, masked, set in the running container (bcdevenv set-password, the variable
+  passed by name with docker exec -e) and never stored in the image; no secret is needed.
+inputs:
+  shell:
+    description: Accepted for compatibility with RunPipeline. The pipeline always runs in pwsh.
+    required: false
+    default: powershell
+  artifact:
+    description: Accepted for compatibility with RunPipeline and ignored. The platform version comes from build/Packages.json (BCPlatform).
+    required: false
+    default: ''
+  project:
+    description: AL-Go project to build
+    required: false
+    default: '.'
+  buildMode:
+    description: AL-Go build mode
+    required: false
+    default: Default
+  installAppsJson:
+    description: Dependency apps to install (DownloadProjectDependencies output DownloadedApps)
+    required: false
+    default: ''
+  installTestAppsJson:
+    description: Dependency test apps to install (DownloadProjectDependencies output DownloadedTestApps)
+    required: false
+    default: ''
+  baselineWorkflowRunId:
+    description: Accepted for compatibility with RunPipeline and ignored (all project apps are installed and tested).
+    required: false
+    default: '0'
+  baselineWorkflowSHA:
+    description: Accepted for compatibility with RunPipeline and ignored.
+    required: false
+    default: ''
+  previousAppsPath:
+    description: Previous release apps (DownloadPreviousRelease output). Upgrade testing is not performed; the apps are installed into an empty database.
+    required: false
+    default: ''
+  licenseSecretName:
+    description: >-
+      Key in the ReadSecrets output ($env:Secrets) that holds the license: an http(s) URL, a gzip+base64
+      encoded license or a path. AL-Go's licenseFileUrlSecretName setting maps licenseFileUrl to the
+      repository/organization secret actually used. When the secret is not available, the CRONUS license
+      of the AL-Go application artifact (the one AL-Go resolves from the 'artifact' setting) is used, as
+      AL-Go does without licenseFileUrl; an empty platform database holds no license of its own.
+    required: false
+    default: licenseFileUrl
+  testExecutor:
+    description: >-
+      How the selected tests are executed: altool (the AL tool's runtests in a client session through
+      the development endpoint) or odata (the BcDevEnvTestRunner OData service). Empty uses the AL-Go
+      setting bcdevenvTestExecutor, else altool. The BcDevEnvTestRunner selects the tests in both cases.
+    required: false
+    default: ''
+  alToolVersion:
+    description: >-
+      NuGet version of Microsoft.Dynamics.BusinessCentral.Development.Tools used by the altool executor.
+      Empty uses the AL-Go setting bcdevenvAlToolVersion, else the pinned default (30.0.44.47290-beta).
+    required: false
+    default: ''
+  appTestTimeoutMinutes:
+    description: >-
+      Timeout of the altool executor per test app and test pass, in minutes. Empty uses the AL-Go setting
+      bcdevenvAppTestTimeoutMinutes, else 240.
+    required: false
+    default: ''
+  testPermissionsMock:
+    description: >-
+      altool executor: the state of the permissions mock (Permissions Mock, codeunit 131006) set by the
+      state reset that runs before every test codeunit. on starts it, as the Test Runner does before every
+      test method - without assignments for codeunits whose TestPermissions is Disabled, otherwise with the
+      D365 Full Access base of codeunit 130302 Set State Test Run (when installed); off stops it. Only
+      applies when Permissions Mock is installed.
+      Empty uses the AL-Go setting bcdevenvTestPermissionsMock, else on.
+    required: false
+    default: ''
+  testStateProbe:
+    description: >-
+      altool executor, diagnostic: on runs the BcDevEnv State Probe test codeunit once per AL tool batch,
+      first, before the first state reset, and logs its message ("State probe: ..." - ApplicationArea and the
+      login hook, session, Application Area Setup and its restores, TestPage control visibility, permissions
+      mock, work date). It always fails and is not a test result. Empty uses the AL-Go setting
+      bcdevenvTestStateProbe, else off.
+    required: false
+    default: ''
+  t2embedUrl:
+    description: >-
+      URL of t2embed.dll (font embedding, needed to render reports as PDF; Windows Server Core lacks it),
+      copied into the image's System32 when missing: a zip archive with install/t2embed.dll or the DLL
+      itself. Empty uses the AL-Go setting bcdevenvT2EmbedUrl, else the install archive of the official
+      Business Central images (nav-docker-install.zip on bcartifacts).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Run pipeline
+      shell: pwsh
+      env:
+        _project: ${{ inputs.project }}
+        _buildMode: ${{ inputs.buildMode }}
+        _installAppsJson: ${{ inputs.installAppsJson }}
+        _installTestAppsJson: ${{ inputs.installTestAppsJson }}
+        _previousAppsPath: ${{ inputs.previousAppsPath }}
+        _licenseSecretName: ${{ inputs.licenseSecretName }}
+        _testExecutor: ${{ inputs.testExecutor }}
+        _alToolVersion: ${{ inputs.alToolVersion }}
+        _appTestTimeoutMinutes: ${{ inputs.appTestTimeoutMinutes }}
+        _testPermissionsMock: ${{ inputs.testPermissionsMock }}
+        _testStateProbe: ${{ inputs.testStateProbe }}
+        _t2embedUrl: ${{ inputs.t2embedUrl }}
+        DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        DOTNET_NOLOGO: '1'
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $project = if ([string]::IsNullOrWhiteSpace($env:_project)) { '.' } else { $env:_project }
+        $projectPath = if ($project -eq '.') { $env:GITHUB_WORKSPACE } else { Join-Path $env:GITHUB_WORKSPACE $project }
+        $buildOutput = Join-Path $projectPath 'BuildOutput.txt'
+        $parameters = @{
+          Project               = $project
+          BuildMode             = $env:_buildMode
+          InstallAppsJson       = $env:_installAppsJson
+          InstallTestAppsJson   = $env:_installTestAppsJson
+          LicenseSecretName     = $env:_licenseSecretName
+          PreviousAppsPath      = $env:_previousAppsPath
+          TestExecutor          = $env:_testExecutor
+          AlToolVersion         = $env:_alToolVersion
+          AppTestTimeoutMinutes = $env:_appTestTimeoutMinutes
+          TestPermissionsMock   = $env:_testPermissionsMock
+          TestStateProbe        = $env:_testStateProbe
+          T2EmbedUrl            = $env:_t2embedUrl
+        }
+        try {
+          & (Join-Path $env:GITHUB_ACTION_PATH 'RunBcDevEnvPipeline.ps1') @parameters *>&1 | Tee-Object -FilePath $buildOutput -Append
+        }
+        catch {
+          $message = $_.Exception.Message
+          Add-Content -LiteralPath $buildOutput -Value "ERROR: $message" -Encoding UTF8
+          foreach ($line in ($message -split "`r?`n")) { if ($line.Trim()) { Write-Host "::error::$line" } }
+          Write-Host $_.ScriptStackTrace
+          exit 1
+        }
+
+    - name: Cleanup
+      if: always()
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        if ($env:BCDEVENV_PIPELINE_CONTAINER) { docker rm -f $env:BCDEVENV_PIPELINE_CONTAINER *> $null }
+        if ($env:BCDEVENV_PIPELINE_IMAGE) { docker image rm -f $env:BCDEVENV_PIPELINE_IMAGE *> $null }
+        foreach ($folder in @($env:BCDEVENV_PIPELINE_WORK, $env:BCDEVENV_PIPELINE_HOME)) {
+          if ($folder -and (Test-Path -LiteralPath $folder)) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        exit 0
+
+branding:
+  icon: terminal
+  color: blue

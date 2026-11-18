@@ -1,0 +1,10 @@
+<Project>
+  <!-- Nearest Directory.Packages.props halts NuGet's upward search, so the
+       enlistment-root central package versions are not applied to bcdevenv.
+       Central Package Management stays OFF for this tool; versions live inline
+       on PackageReference in BcDevEnv.Cli.csproj. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+</Project>
