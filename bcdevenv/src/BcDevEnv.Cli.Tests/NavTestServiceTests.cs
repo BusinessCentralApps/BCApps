@@ -85,6 +85,6 @@ public class NavTestServiceTests
         var properties = doc.Descendants("property").ToDictionary(
             p => p.Attribute("name")!.Value, p => p.Attribute("value")!.Value);
         Assert.Equal("System Application Test", properties["appName"]);
-        Assert.Equal("test-extension", properties["extensionId"]);
+        Assert.Equal("test-extension", properties["extensionid"]);
     }
 }

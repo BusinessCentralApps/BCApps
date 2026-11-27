@@ -456,6 +456,15 @@ without a matching entry, fails the command even with `--allow-failures`. The
 skip report also counts entries that matched no test in the run (stale, or outside
 the selection; listed with `--verbose`).
 
+### JUnit report
+
+Like the reports of AL-Go/BcContainerHelper, every test codeunit is a `<testsuite>`
+named `<id> <name>` (e.g. `139769 Bank Deposit Posting Tests`; just the id when the
+codeunit has no name), which is also the `classname` of its `<testcase>`s, with the
+properties `appName` and `extensionid` (the app id as a lowercase GUID without
+braces). AL-Go's `AnalyzeTests` and the repository's Test Tolerance
+(`build\scripts\TestTolerance`) read these.
+
 Run `bcdevenv help run-tests` for all flags (`--allow-failures`, `--extension`,
 `--test-codeunit`, `--auth`, …). `--auth` is `Windows` (default) or `UserPassword`
 (`NavUserPassword` is accepted as the same) with `--user` and the password from
@@ -537,7 +546,11 @@ build mode it:
    the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
    `run-tests --protocol per-codeunit` per app and isolation pass (the codeunits that
    require isolation `Disabled` separately), with every `DisabledTests` folder of the
-   repository (`src\DisabledTests`) copied into the container. The tests are executed
+   repository (`src\DisabledTests`) copied into the container. `src\DisabledTests`
+   also has the entries upstream `microsoft/BCApps` `main` added up to commit
+   `26849205a` (83 entries in 11 apps' files); the entries `main` removed since then
+   are kept, because the fork's test code does not have the upstream changes that
+   re-enabled those tests. The tests are executed
    by the **AL tool** (`--executor altool`, see [Running tests](#running-tests)): the
    `Microsoft.Dynamics.BusinessCentral.Development.Tools` package is downloaded from
    nuget.org (with retries), its `tools\net10.0\any` folder is copied into the
@@ -556,12 +569,40 @@ build mode it:
    `bcdevenvTestPermissionsMock` and `bcdevenvTestStateProbe` (`true`/`false`).
    The log names the executor of every app and pass (`Tests: <app> - <pass> (executor
    altool <version>)`), the permissions mock setting and, when on, the state probe;
-5. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
+5. applies upstream's **Test Tolerance** (`build\scripts\TestTolerance\TestTolerance.psm1`,
+   unchanged) when tests failed. It downloads the latest unexpired artifact
+   `unstable-tests-<branch>` of `microsoft/BCApps` through the GitHub REST API with the
+   action input `token` (default: the workflow's `GITHUB_TOKEN`; the token is removed
+   from the environment before any other process starts), for the branch upstream's
+   `Get-ToleranceBranch` resolves (the pull request's base branch or the pushed branch
+   when it is `main` or `releases/*`, otherwise `main`). When every failed test of a
+   test app (across its isolation passes, as upstream checks an app's results file) is
+   in that list, matched on extension id, codeunit id and method (so country apps that
+   reuse a codeunit id stay apart), those failures are rewritten in the app's reports
+   as skipped test cases `Failed (tolerated by Test Tolerance)` named
+   `<method> (tolerated)`, and each is logged as
+   `TOLERATED: <app> :: <extension id> :: <codeunit> :: <method> - <reason>`; when any
+   failed test of the app is not in the list, none of its failures is tolerated.
+   Differences to upstream's `RunTestsInBcContainer.ps1`: the fork has no unstable tests
+   list of its own (upstream's `UpdateUnstableTests`/`AddUnstableTestsFromRun` workflows
+   only run in `microsoft`'s repository), so the list of `microsoft/BCApps` is used
+   (override it with the action input `unstableTestsRepository` or the AL-Go setting
+   `bcdevenvUnstableTestsRepository`, `owner/name`, or `none` to switch Test Tolerance
+   off); it applies to every event, not only to pull requests, because the fork's test
+   jobs also run on push and `workflow_dispatch` and its runs do not feed upstream's
+   detection; and when the list cannot be downloaded (no token, an HTTP error, no
+   unexpired artifact) a warning with the cause is written and no failure is tolerated,
+   without failing the step for that. Whether the fork's workflow token may download
+   another repository's artifacts is not verified yet (GitHub's artifact download
+   endpoints require authentication even for public repositories); if the warning shows
+   401/403, pass a token that can read public repositories with the `token` input;
+6. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
    `AnalyzeTests`) and `<project>\.buildartifacts\TestResults.xml` (uploaded test
    results artifact); the log is written to `<project>\BuildOutput.txt`, and on
    failure the container's event log to `<project>\ContainerEventLog.evtx`.
 
-The step fails on any failing test, on runner/DisabledTests violations, on a
+The step fails on any failing test that Test Tolerance does not tolerate, on
+runner/DisabledTests violations, on a
 missing report, and when test apps were selected but no test ran. It does not use
 BcContainerHelper; the surrounding AL-Go steps (`CompileApps`, `PipelineCleanup`, …)
 are unchanged and still do, except that `PipelineCleanup` is `continue-on-error`:

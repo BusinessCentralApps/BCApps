@@ -14,10 +14,14 @@
          the tests of each pass (test type, required test isolation, DisabledTests) and, with the
          default test executor 'altool', the AL tool's runtests (Microsoft.Dynamics.BusinessCentral.
          Development.Tools from nuget.org) executes them in a client session through the
-         development endpoint; with the test executor 'odata' the OData service executes them.
+         development endpoint; with the test executor 'odata' the OData service executes them,
+      5. applies Test Tolerance (build/scripts/TestTolerance): failures of a test app whose failed
+         tests are all in the unstable tests list of microsoft/BCApps (or UnstableTestsRepository)
+         are reported as skipped and tolerated.
 
     Test results are written to <project>/TestResults.xml (read by AL-Go's AnalyzeTests) and
-    <project>/.buildartifacts/TestResults.xml (uploaded as the test results artifact).
+    <project>/.buildartifacts/TestResults.xml (uploaded as the test results artifact). The GitHub
+    token that downloads the unstable tests list is read from $env:_token.
 #>
 [CmdletBinding()]
 param(
@@ -32,13 +36,17 @@ param(
     [string] $AppTestTimeoutMinutes = '',
     [string] $TestPermissionsMock = '',
     [string] $TestStateProbe = '',
-    [string] $T2EmbedUrl = ''
+    [string] $T2EmbedUrl = '',
+    [string] $UnstableTestsRepository = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version 2.0
 
+# Kept out of the environment of the processes started below (dotnet, docker); only Test Tolerance uses it.
+$githubToken = "$env:_token"
+Remove-Item -LiteralPath 'Env:_token' -ErrorAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot '../../../build/scripts/BcDevEnvPipeline.psm1' -Resolve) -Force -DisableNameChecking
 
 $repoRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path }
@@ -112,6 +120,16 @@ if ($plan.Action -eq 'Test') {
     }
     else {
         Write-Host "Test executor: odata - the BcDevEnvTestRunner OData service selects and runs the tests"
+    }
+}
+# Resolved up front so that an invalid configured repository fails before the long setup.
+$unstableTestsRepository = Get-BcDevEnvUnstableTestsRepository -Settings $settings -Repository $UnstableTestsRepository
+if ($plan.Action -eq 'Test') {
+    if ($unstableTestsRepository) {
+        Write-Host "Test Tolerance: on every event - when tests fail, the unstable tests list $(Get-BcDevEnvUnstableTestsArtifactName) of $unstableTestsRepository is downloaded; an app whose failed tests are all in it is tolerated"
+    }
+    else {
+        Write-Host 'Test Tolerance: off (bcdevenvUnstableTestsRepository is none)'
     }
 }
 # Resolved up front so that an invalid configured URL fails before the long setup.
@@ -375,6 +393,9 @@ try {
     $resultsFolder = Join-Path $work 'results'
     New-Item -ItemType Directory -Path $resultsFolder -Force | Out-Null
     $resultFiles = @()
+    # The reports of each test app (all passes), for Test Tolerance, which tolerates the failures of an app as a whole.
+    $appResults = [ordered]@{}
+    foreach ($app in $selected) { $appResults[[string]$app.Id] = [pscustomobject]@{ Name = [string]$app.Name; Files = @() } }
     $infrastructureErrors = @()
     $passIndex = 0
     foreach ($pass in $plan.Passes) {
@@ -396,6 +417,7 @@ try {
                 continue
             }
             $resultFiles += $hostResult
+            $appResults[[string]$app.Id].Files += $hostResult
             $summary = Get-BcDevEnvJUnitSummary -Path $hostResult
             Write-Host ("{0} [{1}, executor {2}]: {3} test(s), {4} failed, {5} skipped" -f $app.Name, $pass.Name, $executorLabel, $summary.Tests, ($summary.Failures + $summary.Errors), $summary.Skipped)
             if ($exitCode -ne 0) {
@@ -404,14 +426,17 @@ try {
         }
     }
 
+    Write-Section 'Test Tolerance'
+    $tolerance = Invoke-BcDevEnvTestTolerance -AppResults @($appResults.Values) -Repository $unstableTestsRepository -Token $githubToken -OutputDirectory (Join-Path $work 'unstable-tests')
+
     Write-Section 'Test results'
     $outputs = @((Join-Path $projectPath 'TestResults.xml'), (Join-Path $projectPath '.buildartifacts/TestResults.xml'))
     $counts = Merge-BcDevEnvJUnitResults -InputFiles $resultFiles -OutputFiles $outputs -SuiteName 'BusinessCentral'
-    Write-Host ("Total: {0} test(s), {1} failure(s), {2} error(s), {3} skipped (DisabledTests or by the test runner), {4:0.#}s; executor {5}" -f $counts.Tests, $counts.Failures, $counts.Errors, $counts.Skipped, $counts.Time, $executorLabel)
+    Write-Host ("Total: {0} test(s), {1} failure(s), {2} error(s), {3} skipped (DisabledTests or by the test runner, {4} of them tolerated failures), {5:0.#}s; executor {6}" -f $counts.Tests, $counts.Failures, $counts.Errors, $counts.Skipped, $tolerance.ToleratedCount, $counts.Time, $executorLabel)
     foreach ($output in $outputs) { Write-Host "Written: $output" }
     Write-Host "::endgroup::"
 
-    $gateFailures = @(Get-BcDevEnvTestGateFailures -SelectedAppCount $selected.Count -Counts $counts -InfrastructureErrors $infrastructureErrors)
+    $gateFailures = @(Get-BcDevEnvTestGateFailures -SelectedAppCount $selected.Count -Counts $counts -InfrastructureErrors $infrastructureErrors -ToleratedCount $tolerance.ToleratedCount)
     if ($gateFailures.Count -gt 0) {
         throw ("$Project ($BuildMode) failed:`n" + ($gateFailures -join "`n"))
     }

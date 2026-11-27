@@ -40,8 +40,41 @@ public class JUnitResultWriterTests
     {
         var doc = JUnitResultWriter.ToDocument(SampleRun());
         var suite = Assert.Single(doc.Root!.Elements("testsuite"));
-        Assert.Equal("Customer Tests", suite.Attribute("name")!.Value);
+        Assert.Equal("134000 Customer Tests", suite.Attribute("name")!.Value);
         Assert.Equal(3, suite.Elements("testcase").Count());
+        Assert.All(suite.Elements("testcase"), t => Assert.Equal("134000 Customer Tests", t.Attribute("classname")!.Value));
+    }
+
+    [Theory]
+    [InlineData("Codeunit 139769 Bank Deposit Posting Tests", null, 139769, "139769 Bank Deposit Posting Tests")]
+    [InlineData("Codeunit 139769 Bank Deposit Posting Tests", "Bank Deposit Posting Tests", 139769, "139769 Bank Deposit Posting Tests")]
+    [InlineData("Codeunit 50000", null, 50000, "50000")]
+    [InlineData("Imported suite", null, null, "Imported suite")]
+    public void Suite_names_follow_BcContainerHelper_id_and_name(string name, string? codeunitName, int? codeunitId, string expected)
+    {
+        var cu = new TestCodeunitResult { Name = name, CodeunitName = codeunitName, CodeunitId = codeunitId };
+        Assert.Equal(expected, JUnitResultWriter.SuiteName(cu));
+    }
+
+    [Fact]
+    public void Extension_id_is_written_as_lower_case_guid_without_braces()
+    {
+        var run = new TestRunResult();
+        var cu = new TestCodeunitResult
+        {
+            Name = "Codeunit 139769 Bank Deposit Posting Tests",
+            CodeunitId = 139769,
+            AppName = "Bank Deposits Tests",
+            ExtensionId = "{798A05DA-1C2B-4D3E-8F90-ABCDEF012345}",
+        };
+        cu.Methods.Add(new TestMethodResult { Name = "T", Outcome = TestOutcome.Passed });
+        run.Codeunits.Add(cu);
+        var doc = JUnitResultWriter.ToDocument(run);
+        var properties = doc.Descendants("property").ToDictionary(
+            p => p.Attribute("name")!.Value, p => p.Attribute("value")!.Value, StringComparer.Ordinal);
+        Assert.Equal("798a05da-1c2b-4d3e-8f90-abcdef012345", properties["extensionid"]);
+        Assert.Equal("Bank Deposits Tests", properties["appName"]);
+        Assert.False(properties.ContainsKey("extensionId"));
     }
 
     [Fact]

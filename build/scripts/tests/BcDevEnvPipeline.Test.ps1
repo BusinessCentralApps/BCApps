@@ -814,6 +814,219 @@ Describe "Merge-BcDevEnvJUnitResults and Get-BcDevEnvTestGateFailures" {
         $failures.Count | Should -Be 1
         $failures[0] | Should -BeLike '*runner/infrastructure*Library Tests: exit code 3*'
     }
+
+    It "counts tolerated failures, which are skipped test cases by then, as executed" {
+        $allTolerated = [pscustomobject]@{ Tests = 2; Failures = 0; Errors = 0; Skipped = 2 }
+        @(Get-BcDevEnvTestGateFailures -SelectedAppCount 1 -Counts $allTolerated) | Should -BeLike '*no test was executed*'
+        @(Get-BcDevEnvTestGateFailures -SelectedAppCount 1 -Counts $allTolerated -ToleratedCount 2).Count | Should -Be 0
+    }
+}
+
+Describe "Test Tolerance" {
+    BeforeAll {
+        $script:bankDepositExtension = '798a05da-1c2b-4d3e-8f90-abcdef012345'
+        $script:otherCountryExtension = '11111111-2222-3333-4444-555555555555'
+
+        # A report in the format of bcdevenv run-tests (JUnitResultWriter): suite and classname "<id> <name>", extensionid lowercase without braces.
+        function New-RunTestsReport {
+            param([string] $Path, [string] $ExtensionId, [string] $Suite, [object[]] $Cases)
+            $failures = @($Cases | Where-Object { $_.Failed }).Count
+            $caseXml = ($Cases | ForEach-Object {
+                    if ($_.Failed) { "    <testcase name=`"$($_.Name)`" classname=`"$Suite`" time=`"1`"><failure message=`"$($_.Name) failed`" type=`"Failure`">stack</failure></testcase>" }
+                    else { "    <testcase name=`"$($_.Name)`" classname=`"$Suite`" time=`"1`" />" }
+                }) -join "`n"
+            $content = @"
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="Bank Deposits Tests" tests="$($Cases.Count)" failures="$failures" errors="0" skipped="0" time="1">
+  <testsuite name="$Suite" tests="$($Cases.Count)" failures="$failures" errors="0" skipped="0" time="1" timestamp="2026-01-01T00:00:00.0000000Z">
+    <properties>
+      <property name="appName" value="Bank Deposits Tests" />
+      <property name="extensionid" value="$ExtensionId" />
+    </properties>
+$caseXml
+  </testsuite>
+</testsuites>
+"@
+            [System.IO.File]::WriteAllText($Path, $content, (New-Object System.Text.UTF8Encoding $false))
+            return $Path
+        }
+
+        function New-Case([string] $Name, [switch] $Failed) { [pscustomobject]@{ Name = $Name; Failed = [bool]$Failed } }
+
+        $script:unstablePath = Join-Path $TestDrive 'unstable-tests.json'
+        @{
+            branch    = 'main'
+            updatedAt = '2026-01-01T00:00:00Z'
+            tests     = @(
+                @{ extensionId = $script:bankDepositExtension; codeunitId = 139769; codeunitName = 'Bank Deposit Posting Tests'; testMethod = 'PostedBankDepositPageShowsCorrectRecordAfterPosting'; reason = 'Failed in 1 of the last 3 CI/CD runs'; linkedIssue = '' }
+                @{ extensionId = $script:bankDepositExtension; codeunitId = 139769; codeunitName = 'Bank Deposit Posting Tests'; testMethod = 'PostAndPrintBankDeposit'; reason = 'Flaky'; linkedIssue = '123' }
+            )
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:unstablePath -Encoding UTF8
+    }
+
+    BeforeEach {
+        $folder = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    }
+
+    Context "Get-BcDevEnvUnstableTestsRepository" {
+        It "prefers the input over the AL-Go setting over microsoft/BCApps, and none turns it off" {
+            Get-BcDevEnvUnstableTestsRepository -Settings (New-TestSettings) | Should -Be 'microsoft/BCApps'
+            Get-BcDevEnvUnstableTestsRepository -Settings (New-TestSettings @{ bcdevenvUnstableTestsRepository = 'contoso/BCApps' }) | Should -Be 'contoso/BCApps'
+            Get-BcDevEnvUnstableTestsRepository -Settings (New-TestSettings @{ bcdevenvUnstableTestsRepository = 'contoso/BCApps' }) -Repository ' fabrikam/apps ' | Should -Be 'fabrikam/apps'
+            Get-BcDevEnvUnstableTestsRepository -Settings (New-TestSettings @{ bcdevenvUnstableTestsRepository = 'None' }) | Should -Be ''
+            { Get-BcDevEnvUnstableTestsRepository -Settings (New-TestSettings) -Repository 'https://github.com/microsoft/BCApps' } | Should -Throw '*Invalid unstable tests repository*'
+        }
+    }
+
+    Context "Update-BcDevEnvTestResultsForTolerance" {
+        It "tolerates an app whose failed tests are all in the list, across its test passes, and rewrites them as skipped" {
+            $suite = '139769 Bank Deposit Posting Tests'
+            $pass1 = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:bankDepositExtension -Suite $suite -Cases @(
+                (New-Case 'PostedBankDepositPageShowsCorrectRecordAfterPosting' -Failed), (New-Case 'PostBankDeposit'))
+            $pass2 = New-RunTestsReport -Path (Join-Path $folder '02-001.xml') -ExtensionId $script:bankDepositExtension -Suite $suite -Cases @((New-Case 'PostAndPrintBankDeposit' -Failed))
+
+            $result = Update-BcDevEnvTestResultsForTolerance -AppResults @([pscustomobject]@{ Name = 'Bank Deposits Tests'; Files = @($pass1, $pass2) }) -UnstableTestsPath $script:unstablePath 6>$null
+
+            $result.ToleratedCount | Should -Be 2
+            $result.UnstableTestCount | Should -Be 2
+            @($result.Tolerated | ForEach-Object { $_.TestMethod }) | Should -Be @('PostedBankDepositPageShowsCorrectRecordAfterPosting', 'PostAndPrintBankDeposit')
+            [xml]$rewritten = Get-Content -LiteralPath $pass1 -Raw
+            $case = $rewritten.SelectSingleNode("//testcase[skipped]")
+            $case.name | Should -Be 'PostedBankDepositPageShowsCorrectRecordAfterPosting (tolerated)'
+            $case.SelectSingleNode('skipped').message | Should -BeLike 'Failed (tolerated by Test Tolerance)*'
+            $rewritten.SelectNodes('//testcase[failure]').Count | Should -Be 0
+
+            $counts = Merge-BcDevEnvJUnitResults -InputFiles @($pass1, $pass2) -OutputFiles @((Join-Path $folder 'TestResults.xml'))
+            $counts.Failures | Should -Be 0
+            $counts.Skipped | Should -Be 2
+            @(Get-BcDevEnvTestGateFailures -SelectedAppCount 1 -Counts $counts -ToleratedCount $result.ToleratedCount).Count | Should -Be 0
+        }
+
+        It "tolerates nothing of an app with a failed test that is not in the list, so the gate fails" {
+            $suite = '139769 Bank Deposit Posting Tests'
+            $report = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:bankDepositExtension -Suite $suite -Cases @(
+                (New-Case 'PostedBankDepositPageShowsCorrectRecordAfterPosting' -Failed), (New-Case 'NotInTheList' -Failed))
+            $before = Get-Content -LiteralPath $report -Raw
+
+            $result = Update-BcDevEnvTestResultsForTolerance -AppResults @([pscustomobject]@{ Name = 'Bank Deposits Tests'; Files = @($report) }) -UnstableTestsPath $script:unstablePath 6>$null
+
+            $result.ToleratedCount | Should -Be 0
+            Get-Content -LiteralPath $report -Raw | Should -Be $before
+            $counts = Merge-BcDevEnvJUnitResults -InputFiles @($report) -OutputFiles @((Join-Path $folder 'TestResults.xml'))
+            @(Get-BcDevEnvTestGateFailures -SelectedAppCount 1 -Counts $counts -ToleratedCount $result.ToleratedCount) | Should -BeLike '*2 of 2 test(s) failed*'
+        }
+
+        It "does not tolerate the same codeunit and method of another extension (country apps reuse codeunit ids)" {
+            $report = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:otherCountryExtension -Suite '139769 Other Country Tests' -Cases @(
+                (New-Case 'PostedBankDepositPageShowsCorrectRecordAfterPosting' -Failed))
+            $before = Get-Content -LiteralPath $report -Raw
+
+            $result = Update-BcDevEnvTestResultsForTolerance -AppResults @([pscustomobject]@{ Name = 'Other Country Tests'; Files = @($report) }) -UnstableTestsPath $script:unstablePath 6>$null
+
+            $result.ToleratedCount | Should -Be 0
+            Get-Content -LiteralPath $report -Raw | Should -Be $before
+        }
+    }
+
+    Context "Receive-BcDevEnvUnstableTests" {
+        BeforeEach {
+            Mock -ModuleName BcDevEnvPipeline Write-Host { }
+        }
+
+        It "downloads the newest unexpired artifact of the repository with the token and returns its unstable-tests.json" {
+            $zipContent = Join-Path $folder 'zip-content'
+            New-Item -ItemType Directory -Path $zipContent -Force | Out-Null
+            Copy-Item -LiteralPath $script:unstablePath -Destination (Join-Path $zipContent 'unstable-tests.json')
+            $script:artifactZip = Join-Path $folder 'artifact.zip'
+            Compress-Archive -Path (Join-Path $zipContent '*') -DestinationPath $script:artifactZip
+            Mock -ModuleName BcDevEnvPipeline Invoke-RestMethod {
+                [pscustomobject]@{ total_count = 2; artifacts = @(
+                        [pscustomobject]@{ id = 1; expired = $true; created_at = '2026-01-02T00:00:00Z' },
+                        [pscustomobject]@{ id = 2; expired = $false; created_at = '2026-01-01T00:00:00Z' }) }
+            }
+            Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { Copy-Item -LiteralPath $script:artifactZip -Destination $OutFile }
+
+            $path = Receive-BcDevEnvUnstableTests -Repository 'microsoft/BCApps' -Branch 'releases/27.x' -OutputDirectory (Join-Path $folder 'out') -Token 'secret-token'
+
+            $path | Should -BeLike '*unstable-tests.json'
+            (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).tests.Count | Should -Be 2
+            Should -Invoke -ModuleName BcDevEnvPipeline Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+                $Uri -eq 'https://api.github.com/repos/microsoft/BCApps/actions/artifacts?name=unstable-tests-releases-27.x&per_page=20' -and $Headers.Authorization -eq 'Bearer secret-token'
+            }
+            Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://api.github.com/repos/microsoft/BCApps/actions/artifacts/2/zip' }
+            Should -Invoke -ModuleName BcDevEnvPipeline Write-Host -Times 0 -Exactly -ParameterFilter { "$Object" -like '*secret-token*' }
+        }
+
+        It "warns and returns nothing when the download fails" {
+            Mock -ModuleName BcDevEnvPipeline Invoke-RestMethod { throw 'Response status code does not indicate success: 403 (Forbidden).' }
+
+            Receive-BcDevEnvUnstableTests -Repository 'microsoft/BCApps' -Branch 'main' -OutputDirectory $folder -Token 'secret-token' | Should -BeNullOrEmpty
+
+            Should -Invoke -ModuleName BcDevEnvPipeline Write-Host -Times 1 -Exactly -ParameterFilter {
+                "$Object" -like '::warning::Test Tolerance: could not get*unstable-tests-main*microsoft/BCApps*403 (Forbidden)*No test failure is tolerated.'
+            }
+        }
+
+        It "warns when there is no token, without calling the API, or no unexpired artifact" {
+            Mock -ModuleName BcDevEnvPipeline Invoke-RestMethod { [pscustomobject]@{ artifacts = @([pscustomobject]@{ id = 1; expired = $true }) } }
+            Mock -ModuleName BcDevEnvPipeline Invoke-WebRequest { throw 'not expected' }
+
+            Receive-BcDevEnvUnstableTests -Repository 'microsoft/BCApps' -Branch 'main' -OutputDirectory $folder -Token '' | Should -BeNullOrEmpty
+            Should -Invoke -ModuleName BcDevEnvPipeline Invoke-RestMethod -Times 0 -Exactly
+            Should -Invoke -ModuleName BcDevEnvPipeline Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '::warning::*no GitHub token*' }
+
+            Receive-BcDevEnvUnstableTests -Repository 'microsoft/BCApps' -Branch 'main' -OutputDirectory $folder -Token 'secret-token' | Should -BeNullOrEmpty
+            Should -Invoke -ModuleName BcDevEnvPipeline Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '::warning::*has no unexpired artifact*1 found*' }
+            Should -Invoke -ModuleName BcDevEnvPipeline Invoke-WebRequest -Times 0 -Exactly
+        }
+    }
+
+    Context "Invoke-BcDevEnvTestTolerance" {
+        BeforeEach {
+            $script:savedRefs = @{ GITHUB_BASE_REF = $env:GITHUB_BASE_REF; GITHUB_REF_NAME = $env:GITHUB_REF_NAME }
+            $env:GITHUB_BASE_REF = ''
+            $env:GITHUB_REF_NAME = 'feature/x'
+            Mock -ModuleName BcDevEnvPipeline Write-Host { }
+        }
+
+        AfterEach {
+            foreach ($name in $script:savedRefs.Keys) { [Environment]::SetEnvironmentVariable($name, $script:savedRefs[$name]) }
+        }
+
+        It "downloads nothing when no test failed" {
+            Mock -ModuleName BcDevEnvPipeline Receive-BcDevEnvUnstableTests { throw 'not expected' }
+            $report = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:bankDepositExtension -Suite '139769 Bank Deposit Posting Tests' -Cases @((New-Case 'PostBankDeposit'))
+
+            (Invoke-BcDevEnvTestTolerance -AppResults @([pscustomobject]@{ Name = 'Bank Deposits Tests'; Files = @($report) }) -Repository 'microsoft/BCApps' -Token 't' -OutputDirectory $folder).ToleratedCount | Should -Be 0
+            Should -Invoke -ModuleName BcDevEnvPipeline Receive-BcDevEnvUnstableTests -Times 0 -Exactly
+        }
+
+        It "uses the unstable tests list of main for a branch that has none and applies it on any event" {
+            Mock -ModuleName BcDevEnvPipeline Receive-BcDevEnvUnstableTests { $script:unstablePath }
+            $report = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:bankDepositExtension -Suite '139769 Bank Deposit Posting Tests' -Cases @(
+                (New-Case 'PostedBankDepositPageShowsCorrectRecordAfterPosting' -Failed))
+
+            $result = Invoke-BcDevEnvTestTolerance -AppResults @([pscustomobject]@{ Name = 'Bank Deposits Tests'; Files = @($report) }) -Repository 'microsoft/BCApps' -Token 't' -OutputDirectory $folder
+
+            $result.ToleratedCount | Should -Be 1
+            Should -Invoke -ModuleName BcDevEnvPipeline Receive-BcDevEnvUnstableTests -Times 1 -Exactly -ParameterFilter { $Repository -eq 'microsoft/BCApps' -and $Branch -eq 'main' -and $Token -eq 't' }
+            (Get-BcDevEnvJUnitSummary -Path $report).Failures | Should -Be 0
+        }
+
+        It "tolerates nothing when the list cannot be downloaded or Test Tolerance is off" {
+            Mock -ModuleName BcDevEnvPipeline Invoke-RestMethod { throw 'Response status code does not indicate success: 401 (Unauthorized).' }
+            $report = New-RunTestsReport -Path (Join-Path $folder '01-001.xml') -ExtensionId $script:bankDepositExtension -Suite '139769 Bank Deposit Posting Tests' -Cases @(
+                (New-Case 'PostedBankDepositPageShowsCorrectRecordAfterPosting' -Failed))
+            $appResults = @([pscustomobject]@{ Name = 'Bank Deposits Tests'; Files = @($report) })
+
+            (Invoke-BcDevEnvTestTolerance -AppResults $appResults -Repository 'microsoft/BCApps' -Token 't' -OutputDirectory $folder).ToleratedCount | Should -Be 0
+            Should -Invoke -ModuleName BcDevEnvPipeline Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '::warning::*401 (Unauthorized)*' }
+            (Invoke-BcDevEnvTestTolerance -AppResults $appResults -Repository '' -Token 't' -OutputDirectory $folder).ToleratedCount | Should -Be 0
+            Should -Invoke -ModuleName BcDevEnvPipeline Invoke-RestMethod -Times 1 -Exactly
+            (Get-BcDevEnvJUnitSummary -Path $report).Failures | Should -Be 1
+        }
+    }
 }
 
 Describe "Get-BcDevEnvPlatformLayout and Find-BcDevEnvAlc" {

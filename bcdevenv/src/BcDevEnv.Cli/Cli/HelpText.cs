@@ -82,7 +82,11 @@ run-tests - Run the Business Central test suite against a RUNNING server instanc
             non-zero when any test fails (unless --allow-failures), so it gates a CI build.
 
   RESULT OUTPUT
-  --result-file <path>      JUnit report to write (default: TestResults\junit.xml)
+  --result-file <path>      JUnit report to write (default: TestResults\junit.xml). Like the
+                            reports of AL-Go/BcContainerHelper, each test codeunit is a
+                            <testsuite> named "<id> <name>" (also the classname of its test
+                            cases) with the properties appName and extensionid (lowercase
+                            GUID without braces), the format BCApps' Test Tolerance reads.
   --suite-name <name>       Top-level <testsuites> name (default: BusinessCentral)
   --allow-failures          Do not fail the process when tests fail (still writes the report)
   --allow-empty             Treat "no tests found" as success instead of failure

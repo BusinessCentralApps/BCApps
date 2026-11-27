@@ -4,7 +4,8 @@ description: >-
   Replaces microsoft/AL-Go/Actions/RunPipeline for workspace-compiled AL-Go projects. Builds the
   bcdevenv CLI, creates an empty-database Business Central container from the BCPlatform version in
   build/Packages.json, installs the project's apps and test apps (compiled by CompileApps) with their
-  dependencies, and runs the tests while honoring the DisabledTests folders (src/DisabledTests).
+  dependencies, and runs the tests while honoring the DisabledTests folders (src/DisabledTests) and Test
+  Tolerance (the unstable tests list of microsoft/BCApps, see unstableTestsRepository).
   The container uses NavUserPassword authentication with the SUPER user admin, whose password is
   generated for each run, masked, set in the running container (bcdevenv set-password, the variable
   passed by name with docker exec -e) and never stored in the image; no secret is needed.
@@ -100,6 +101,22 @@ inputs:
       Business Central images (nav-docker-install.zip on bcartifacts).
     required: false
     default: ''
+  unstableTestsRepository:
+    description: >-
+      Test Tolerance: the repository (owner/name) whose latest unexpired artifact unstable-tests-<branch>
+      lists the tests whose failures are tolerated (build/scripts/TestTolerance); the branch is the pull
+      request's base branch or the pushed branch when it is main or releases/*, else main. When every failed
+      test of a test app is in the list, its failures are reported as skipped and do not fail the build;
+      otherwise all of them count. Applied on every event (upstream applies it to pull requests only). If
+      the list cannot be downloaded, a warning is logged and no failure is tolerated. Empty uses the AL-Go
+      setting bcdevenvUnstableTestsRepository, else microsoft/BCApps; none turns Test Tolerance off.
+    required: false
+    default: ''
+  token:
+    description: >-
+      GitHub token that downloads the unstable tests artifact (Test Tolerance). Only used when tests fail.
+    required: false
+    default: ${{ github.token }}
 runs:
   using: composite
   steps:
@@ -123,6 +140,8 @@ runs:
         _testPermissionsMock: ${{ inputs.testPermissionsMock }}
         _testStateProbe: ${{ inputs.testStateProbe }}
         _t2embedUrl: ${{ inputs.t2embedUrl }}
+        _unstableTestsRepository: ${{ inputs.unstableTestsRepository }}
+        _token: ${{ inputs.token }}
         DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         DOTNET_NOLOGO: '1'
       run: |
@@ -143,6 +162,7 @@ runs:
           TestPermissionsMock   = $env:_testPermissionsMock
           TestStateProbe        = $env:_testStateProbe
           T2EmbedUrl            = $env:_t2embedUrl
+          UnstableTestsRepository = $env:_unstableTestsRepository
         }
         try {
           & (Join-Path $env:GITHUB_ACTION_PATH 'RunBcDevEnvPipeline.ps1') @parameters *>&1 | Tee-Object -FilePath $buildOutput -Append

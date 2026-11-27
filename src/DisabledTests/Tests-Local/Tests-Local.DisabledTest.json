@@ -312,6 +312,12 @@
   {
     "codeunitId": 141012,
     "codeunitName": "UT REP General Ledger",
+    "method": "*",
+    "bug": "Error: Assert.Fail failed. No row found where Field 'SubTitle' = <Period: 01/27/28..01/27/28>.Row is found where Field 'SubTitle' = <Period: 01/27/28>"
+  },
+  {
+    "codeunitId": 141012,
+    "codeunitName": "UT REP General Ledger",
     "method": "OnAfterGetRecordAddCurrChangeConsolidatedTrialBal4"
   },
   {
@@ -1342,6 +1348,12 @@
   {
     "codeunitId": 142006,
     "codeunitName": "Export Business Data",
+    "method": "*",
+    "bug": ".net not supported in test environment"
+  },
+  {
+    "codeunitId": 142006,
+    "codeunitName": "Export Business Data",
     "method": "ExportBusinessDataInsertsANSITagIntoIndexXml"
   },
   {
@@ -1438,6 +1450,11 @@
     "codeunitId": 142053,
     "codeunitName": "ERM Sales/Purchase Document",
     "method": "TestGLEntryConsistencyErrorIfCommentLineBetweenItem"
+  },
+  {
+    "codeunitId": 142054,
+    "codeunitName": "SalesDocTotalsWithSalesTax",
+    "method": "*"
   },
   {
     "codeunitId": 142054,
@@ -1708,6 +1725,37 @@
     "codeunitId": 142062,
     "codeunitName": "ERM Misc. Report III",
     "method": "ValidateRemitAddressNameOnBankAccountPositivePayExport"
+  },
+  {
+    "codeunitId": 142063,
+    "codeunitName": "SalesDocTotalsSalesEntryUI",
+    "method": "TestSalesOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142063,
+    "codeunitName": "SalesDocTotalsSalesEntryUI",
+    "method": "TestSalesReturnOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142063,
+    "codeunitName": "SalesDocTotalsSalesEntryUI",
+    "method": "TestSalesCrMemoDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142063,
+    "codeunitName": "SalesDocTotalsSalesEntryUI",
+    "method": "TestSalesBlanketOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142063,
+    "codeunitName": "SalesDocTotalsSalesEntryUI",
+    "method": "TestSalesQuoteDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142064,
+    "codeunitName": "UT REP VATSTAT",
+    "method": "*",
+    "bug": "UI handler errors"
   },
   {
     "codeunitId": 142064,
@@ -2037,6 +2085,11 @@
   {
     "codeunitId": 142083,
     "codeunitName": "ERM Electronic Funds Transfer",
+    "method": "ExportPaymentJournalSortedByDocumentNo"
+  },
+  {
+    "codeunitId": 142083,
+    "codeunitName": "ERM Electronic Funds Transfer",
     "method": "GeneratingEFTFileInCAFormatRollbackAllExportedLinesOnError"
   },
   {
@@ -2053,6 +2106,36 @@
     "codeunitId": 142083,
     "codeunitName": "ERM Electronic Funds Transfer",
     "method": "TheRemittanceAdviceGeneratedFromThePaymentJournalsPageIsNotAccurateWhenTheInvoicesBeingPaidArEInAForeignCurrency"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchInvoiceDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchReturnOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchCrMemoDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchBlanketOrderDisplaysDocTotalsNoInvoiceDiscount"
+  },
+  {
+    "codeunitId": 142085,
+    "codeunitName": "PurchDocTotalsSalesEntryUI",
+    "method": "TestPurchQuoteDisplaysDocTotalsNoInvoiceDiscount"
   },
   {
     "codeunitId": 142091,
@@ -2312,6 +2395,12 @@
   {
     "codeunitId": 142096,
     "codeunitName": "Export Electr. Accounting Test",
+    "method": "*",
+    "bug": "Error: Assert.IsTrue failed. Could not find a part of the path .."
+  },
+  {
+    "codeunitId": 142096,
+    "codeunitName": "Export Electr. Accounting Test",
     "method": "ValidateAccountListXSDSchema"
   },
   {
@@ -2418,6 +2507,12 @@
     "codeunitId": 142500,
     "codeunitName": "Export Payments File Handling",
     "method": "ExportPayments_ACH_VendorName"
+  },
+  {
+    "codeunitId": 142500,
+    "codeunitName": "Export Payments File Handling",
+    "method": "*",
+    "bug": "File does not exist"
   },
   {
     "codeunitId": 142500,
@@ -10455,6 +10550,11 @@
     "method": "PaymentLineAccountDimension"
   },
   {
+    "codeunitId": 144046,
+    "codeunitName": "ERM Employee Name",
+    "method": "BlankSecondFamilyNameShouldGiveNoErrorWhenImportEmployeePicture"
+  },
+  {
     "codeunitId": 144048,
     "codeunitName": "Sales Document VAT Amount",
     "method": "BlanketSalesOrderVATAmountIsNotZero"
@@ -12023,6 +12123,16 @@
     "codeunitId": 144071,
     "codeunitName": "UT PAG ABBREV",
     "method": "WorkCtrGroupCalendarWithPeriodTypeMonth"
+  },
+  {
+    "codeunitId": 144072,
+    "codeunitName": "ERM Miscellaneous ES",
+    "method": "NonDeductibleVATOnPurchasesInvoiceBookReport"
+  },
+  {
+    "codeunitId": 144072,
+    "codeunitName": "ERM Miscellaneous ES",
+    "method": "TwoRowsPrintedWithNonDedtVATInPurchInvBookReportForTwoVATEntriesHavingSamePurchInvHdrNo"
   },
   {
     "codeunitId": 144073,
@@ -14798,6 +14908,31 @@
     "codeunitId": 144118,
     "codeunitName": "E-Invoice Reminder",
     "method": "ValidateEInvReminderFile"
+  },
+  {
+    "codeunitId": 144122,
+    "codeunitName": "ERM Purchase VAT EC Calculate",
+    "method": "PostedPurchCrMemoNormalVATWithCurrency"
+  },
+  {
+    "codeunitId": 144122,
+    "codeunitName": "ERM Purchase VAT EC Calculate",
+    "method": "PurchaseInvoicePaymentUnrealizedVAT"
+  },
+  {
+    "codeunitId": 144122,
+    "codeunitName": "ERM Purchase VAT EC Calculate",
+    "method": "ECAmountOnPurchasePrepmtDocTestReportForSecondPrepayment"
+  },
+  {
+    "codeunitId": 144122,
+    "codeunitName": "ERM Purchase VAT EC Calculate",
+    "method": "VATEntryGLEntryAmountsOnPostedPurchaseInvoicePriceInclVAT"
+  },
+  {
+    "codeunitId": 144122,
+    "codeunitName": "ERM Purchase VAT EC Calculate",
+    "method": "PurchaseInvoicePriceInclVATECPageStatistics"
   },
   {
     "codeunitId": 144123,
@@ -20624,10 +20759,43 @@
     "bug": "RU: tax accounting tests - RU tax-accounting demo data cannot be generated in W1 container (no RU language)"
   },
   {
+    "codeunitId": 147312,
+    "codeunitName": "SEPA DD Integration Test - ES",
+    "method": "*",
+    "bug": "ES: Error: The operation cannot complete because it uses a feature that is not supported (.NET Framework Interoperability.)"
+  },
+  {
     "codeunitId": 144519,
     "codeunitName": "ERM Tax Calc Mgt.",
     "method": "*",
     "bug": "RU: tax accounting tests - RU tax-accounting demo data cannot be generated in W1 container (no RU language)"
+  },
+  {
+    "codeunitId": 147529,
+    "codeunitName": "SIIDocumentTests",
+    "method": "*",
+    "bug": "ES: Error: Assert.IsTrue failed. Could not find a part of the path ..."
+  },
+  {
+    "codeunitId": 147531,
+    "codeunitName": "Cartera Recv. Installments",
+    "method": "ApplyCrMemoToCarteraDocWithMultipleInstallments"
+  },
+  {
+    "codeunitId": 147531,
+    "codeunitName": "Cartera Recv. Installments",
+    "method": "ApplyCrMemoToCarteraDocWithMultipleInstallmentsUnrealizedVAT"
+  },
+  {
+    "codeunitId": 147531,
+    "codeunitName": "Cartera Recv. Installments",
+    "method": "ValueOfRemainingAmountLCYStatWhenApplyAndUnApplyOfCustomerLedgerEntry"
+  },
+  {
+    "codeunitId": 147590,
+    "codeunitName": "Test VAT Statement",
+    "method": "*",
+    "bug": "ES: Error: The operation cannot complete because it uses a feature that is not supported (.NET Framework Interoperability.)"
   },
   {
     "codeunitId": 144021,

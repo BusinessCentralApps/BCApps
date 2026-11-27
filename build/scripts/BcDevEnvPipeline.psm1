@@ -61,6 +61,12 @@ $script:SystemApplicationTestLibraryPart = 'SystemApplicationTestLibrary'
 # lacks: the install archive of the official Business Central images (nav-docker generic/Run/SetupUrls.ps1
 # $navDockerInstallUrl; navinstall.ps1 copies its Install\t2embed.dll into System32 when missing).
 $script:DefaultT2EmbedUrl = 'https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip'
+# Test Tolerance (build/scripts/TestTolerance, upstream code reused unchanged): the repository whose latest
+# unstable-tests-<branch> artifact lists the tests whose failures are tolerated. The fork has no such artifact
+# (upstream's UpdateUnstableTests workflow, which maintains it, only runs in microsoft/BCApps).
+$script:DefaultUnstableTestsRepository = 'microsoft/BCApps'
+
+Import-Module (Join-Path $PSScriptRoot 'TestTolerance/TestTolerance.psm1') -DisableNameChecking -Verbose:$false
 
 <#
 .SYNOPSIS
@@ -1871,13 +1877,15 @@ function Merge-BcDevEnvJUnitResults {
 .DESCRIPTION
     Runner/infrastructure errors (run-tests exit codes, missing reports, disabled tests that still
     ran) always fail; so do failing tests and a run in which test apps were selected but no test
-    was executed.
+    was executed. Failures tolerated by Test Tolerance are skipped test cases in the reports by then
+    (see Update-BcDevEnvTestResultsForTolerance); ToleratedCount counts them as executed.
 #>
 function Get-BcDevEnvTestGateFailures {
     param(
         [int] $SelectedAppCount = 0,
         [Parameter(Mandatory = $true)] $Counts,
-        [AllowEmptyCollection()] [string[]] $InfrastructureErrors = @()
+        [AllowEmptyCollection()] [string[]] $InfrastructureErrors = @(),
+        [int] $ToleratedCount = 0
     )
 
     $failures = @()
@@ -1888,10 +1896,220 @@ function Get-BcDevEnvTestGateFailures {
     if (($Counts.Failures + $Counts.Errors) -gt 0) {
         $failures += "$($Counts.Failures + $Counts.Errors) of $($Counts.Tests) test(s) failed ($($Counts.Failures) failure(s), $($Counts.Errors) error(s))."
     }
-    if ($SelectedAppCount -gt 0 -and ($Counts.Tests - $Counts.Skipped) -le 0 -and $infrastructure.Count -eq 0) {
+    if ($SelectedAppCount -gt 0 -and ($Counts.Tests - $Counts.Skipped + $ToleratedCount) -le 0 -and $infrastructure.Count -eq 0) {
         $failures += "$SelectedAppCount test app(s) were selected but no test was executed."
     }
     return $failures
+}
+
+<#
+.SYNOPSIS
+    Resolves the repository whose unstable tests list Test Tolerance uses: the action input wins over the
+    AL-Go setting bcdevenvUnstableTestsRepository, which wins over microsoft/BCApps. none / off / false
+    disables Test Tolerance (returns an empty string).
+#>
+function Get-BcDevEnvUnstableTestsRepository {
+    param(
+        [AllowNull()] $Settings,
+        [AllowEmptyString()] [string] $Repository = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Repository)) { $Repository = [string](Get-BcDevEnvSetting -Settings $Settings -Name 'bcdevenvUnstableTestsRepository' -Default '') }
+    if ([string]::IsNullOrWhiteSpace($Repository)) { $Repository = $script:DefaultUnstableTestsRepository }
+    $Repository = $Repository.Trim()
+    if (@('none', 'off', 'false') -contains $Repository.ToLowerInvariant()) { return '' }
+    if ($Repository -notmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$') {
+        throw "Invalid unstable tests repository '$Repository' (bcdevenvUnstableTestsRepository). Expected owner/name, e.g. $($script:DefaultUnstableTestsRepository), or none to disable Test Tolerance."
+    }
+    return $Repository
+}
+
+<#
+.SYNOPSIS
+    The name of the unstable tests artifact for this run: unstable-tests-<branch>, for the branch upstream's
+    Get-ToleranceBranch resolves (the pull request's base branch or the pushed branch when it is main or
+    releases/*, else main).
+#>
+function Get-BcDevEnvUnstableTestsArtifactName {
+    return Get-UnstableTestsArtifactName -Branch (Get-ToleranceBranch)
+}
+
+<#
+.SYNOPSIS
+    Downloads the unstable tests list of Test Tolerance - the latest unexpired artifact unstable-tests-<branch>
+    of Repository - and returns the path of its unstable-tests.json, or $null.
+.DESCRIPTION
+    The lookup of Receive-UnstableTestsArtifact (build/scripts/TestTolerance), which only reads the current
+    repository, for another repository. Any problem (no token, an HTTP error, no unexpired artifact, no
+    unstable-tests.json in it) is logged as a warning and returns $null: then no failure is tolerated, and the
+    pipeline does not fail for it. The token is only sent in the Authorization header (and not on the
+    redirect to the artifact storage).
+#>
+function Receive-BcDevEnvUnstableTests {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Repository,
+        [Parameter(Mandatory = $true)] [string] $Branch,
+        [Parameter(Mandatory = $true)] [string] $OutputDirectory,
+        [AllowEmptyString()] [string] $Token = '',
+        [string] $ApiUrl = 'https://api.github.com'
+    )
+
+    $artifactName = "unstable-tests-$Branch"
+    try {
+        $artifactName = Get-UnstableTestsArtifactName -Branch $Branch
+        if ([string]::IsNullOrWhiteSpace($Token)) {
+            throw 'no GitHub token is available (the action input token, by default the workflow token)'
+        }
+        $headers = @{ Authorization = "Bearer $Token"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+        $listUri = "$ApiUrl/repos/$Repository/actions/artifacts?name=$([uri]::EscapeDataString($artifactName))&per_page=20"
+        $response = Invoke-RestMethod -Uri $listUri -Headers $headers -Method Get
+        $artifacts = @()
+        if ($null -ne $response -and $response.PSObject.Properties['artifacts']) { $artifacts = @($response.artifacts | Where-Object { $null -ne $_ }) }
+        $artifact = @($artifacts | Where-Object { -not $_.expired }) | Select-Object -First 1
+        if ($null -eq $artifact) {
+            throw "$Repository has no unexpired artifact '$artifactName' ($($artifacts.Count) found)"
+        }
+        Write-Host "Test Tolerance: artifact '$artifactName' of $Repository (id $($artifact.id), created $($artifact.created_at))."
+
+        New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+        $zipPath = Join-Path $OutputDirectory 'unstable-tests.zip'
+        Invoke-WebRequest -Uri "$ApiUrl/repos/$Repository/actions/artifacts/$($artifact.id)/zip" -Headers $headers -OutFile $zipPath -UseBasicParsing | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $OutputDirectory -Force
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        $found = Get-ChildItem -LiteralPath $OutputDirectory -Filter 'unstable-tests.json' -Recurse -File | Select-Object -First 1
+        if ($null -eq $found) { throw "the artifact '$artifactName' (id $($artifact.id)) has no unstable-tests.json" }
+        Write-Host "Test Tolerance: unstable tests list downloaded to '$($found.FullName)'."
+        return $found.FullName
+    }
+    catch {
+        $detail = $_.Exception.Message
+        $exception = $_.Exception
+        if ($exception.PSObject.Properties['Response'] -and $null -ne $exception.Response -and $exception.Response.PSObject.Properties['StatusCode']) {
+            $detail = "HTTP $([int]$exception.Response.StatusCode): $detail"
+        }
+        if ($null -ne $_.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) { $detail += " $($_.ErrorDetails.Message)" }
+        $detail = ($detail -replace '\s*\r?\n\s*', ' ').Trim()
+        Write-Host "::warning::Test Tolerance: could not get the unstable tests list '$artifactName' of $Repository - $detail. No test failure is tolerated."
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Applies Test Tolerance to the JUnit reports of the test apps, per app, as RunTestsInBcContainer.ps1 does to
+    the results file of one app (Test-ShouldTolerateFailures).
+.DESCRIPTION
+    AppResults: one object per test app with Name and Files (the app's JUnit reports of all test passes).
+    When every failed test of an app is in the unstable tests list (key extensionid::codeunit id::method, see
+    Get-UnstableTestKey; the extension id keeps codeunits of different country apps apart), its failures are
+    rewritten in place as skipped test cases "Failed (tolerated by Test Tolerance)" by the upstream
+    Update-TestResultsForTolerance; when any failed test of the app is not in the list, the app's reports are
+    left unchanged and all its failures count. Returns ToleratedCount, Tolerated (App, ExtensionId, CodeunitId,
+    CodeunitName, TestMethod, Reason, LinkedIssue) and UnstableTestCount.
+#>
+function Update-BcDevEnvTestResultsForTolerance {
+    param(
+        [AllowEmptyCollection()] [object[]] $AppResults = @(),
+        [AllowEmptyString()] [string] $UnstableTestsPath = ''
+    )
+
+    $tolerated = @()
+    $unstableCount = 0
+    if (-not [string]::IsNullOrWhiteSpace($UnstableTestsPath) -and (Test-Path -LiteralPath $UnstableTestsPath -PathType Leaf)) {
+        $unstable = Read-UnstableTestsList -Path $UnstableTestsPath
+        $unstableCount = $unstable.Count
+        Write-Host "Test Tolerance: the unstable tests list has $unstableCount test(s)."
+        foreach ($app in @($AppResults | Where-Object { $null -ne $_ })) {
+            if ($unstableCount -eq 0) { break }
+            $failed = New-Object System.Collections.Generic.List[object]
+            $filesWithFailures = @()
+            foreach ($file in @(Get-BcDevEnvStringArray $app.Files)) {
+                if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+                $fileFailures = @(Get-FailedTestsFromResults -Path $file | Where-Object { $null -ne $_ })
+                if ($fileFailures.Count -eq 0) { continue }
+                $filesWithFailures += $file
+                foreach ($failure in $fileFailures) { $failed.Add($failure) }
+            }
+            if ($failed.Count -eq 0) { continue }
+
+            $resolution = Resolve-TestTolerance -FailedTests $failed -UnstableTests $unstable
+            if ($resolution.Tolerated.Count -eq 0) { continue }
+            if ($resolution.Unresolved.Count -gt 0) {
+                Write-Host "$($app.Name): $($resolution.Tolerated.Count) of $($failed.Count) failed test(s) are in the unstable tests list, $($resolution.Unresolved.Count) are not; none is tolerated (only an app whose failed tests are all in the list is tolerated)."
+                foreach ($t in $resolution.Tolerated) { Write-Host "  in the list, not tolerated: $($t.ExtensionId) :: $($t.CodeunitId) $($t.CodeunitName) :: $($t.TestMethod)" }
+                continue
+            }
+
+            foreach ($file in $filesWithFailures) { Update-TestResultsForTolerance -Path $file -ToleratedTests $resolution.Tolerated }
+            foreach ($t in $resolution.Tolerated) {
+                $reason = if ($t.Reason) { " - $($t.Reason)" } else { '' }
+                $issue = if ($t.LinkedIssue) { " (issue: $($t.LinkedIssue))" } else { '' }
+                Write-Host "TOLERATED: $($app.Name) :: $($t.ExtensionId) :: $($t.CodeunitId) $($t.CodeunitName) :: $($t.TestMethod)$reason$issue"
+                $tolerated += [pscustomobject]@{
+                    App          = [string]$app.Name
+                    ExtensionId  = $t.ExtensionId
+                    CodeunitId   = $t.CodeunitId
+                    CodeunitName = $t.CodeunitName
+                    TestMethod   = $t.TestMethod
+                    Reason       = $t.Reason
+                    LinkedIssue  = $t.LinkedIssue
+                }
+            }
+            Write-Host "$($app.Name): all $($resolution.Tolerated.Count) failed test(s) are in the unstable tests list and are tolerated."
+        }
+    }
+
+    return [pscustomobject]@{
+        ToleratedCount    = $tolerated.Count
+        Tolerated         = $tolerated
+        UnstableTestCount = $unstableCount
+    }
+}
+
+<#
+.SYNOPSIS
+    Test Tolerance of the bcdevenv pipeline: when the test apps' reports have failed tests, downloads the unstable
+    tests list of the branch upstream's Get-ToleranceBranch resolves (the pull request's base branch or the pushed
+    branch when it is main or releases/*, else main) from Repository and applies it per app
+    (Update-BcDevEnvTestResultsForTolerance).
+.DESCRIPTION
+    Unlike RunTestsInBcContainer.ps1, which tolerates failures of pull_request builds only, this applies to every
+    event: the fork's test jobs also run on push and workflow_dispatch, and its runs do not feed upstream's
+    detection of unstable tests. An empty Repository disables Test Tolerance.
+#>
+function Invoke-BcDevEnvTestTolerance {
+    param(
+        [AllowEmptyCollection()] [object[]] $AppResults = @(),
+        [AllowEmptyString()] [string] $Repository = '',
+        [AllowEmptyString()] [string] $Token = '',
+        [Parameter(Mandatory = $true)] [string] $OutputDirectory
+    )
+
+    $result = [pscustomobject]@{ ToleratedCount = 0; Tolerated = @(); UnstableTestCount = 0 }
+    $failedCount = 0
+    foreach ($app in @($AppResults | Where-Object { $null -ne $_ })) {
+        foreach ($file in @(Get-BcDevEnvStringArray $app.Files)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $summary = Get-BcDevEnvJUnitSummary -Path $file
+            $failedCount += $summary.Failures + $summary.Errors
+        }
+    }
+    if ($failedCount -eq 0) {
+        Write-Host 'Test Tolerance: no failed test; nothing to tolerate.'
+        return $result
+    }
+    if ([string]::IsNullOrWhiteSpace($Repository)) {
+        Write-Host "Test Tolerance: off (bcdevenvUnstableTestsRepository is none); $failedCount failed test(s) count."
+        return $result
+    }
+
+    $branch = Get-ToleranceBranch
+    Write-Host "Test Tolerance: $failedCount failed test(s); unstable tests list of branch '$branch' from $Repository (applied on every event)."
+    $unstablePath = Receive-BcDevEnvUnstableTests -Repository $Repository -Branch $branch -OutputDirectory $OutputDirectory -Token $Token
+    if (-not $unstablePath) { return $result }
+    $result = Update-BcDevEnvTestResultsForTolerance -AppResults $AppResults -UnstableTestsPath $unstablePath
+    Write-Host "Test Tolerance: $($result.ToleratedCount) of $failedCount failed test(s) tolerated."
+    return $result
 }
 
 <#
