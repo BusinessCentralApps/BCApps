@@ -1,0 +1,188 @@
+// Diagnostic only: 'bcdevenv run-tests --executor altool --state-probe on' runs ProbeState once per AL tool
+// batch, as its first test codeunit, before the first state reset. It always fails on purpose: its error message
+// is one line with the state at the start of the batch (application area, what the login hook of codeunit 50109
+// did in this session, session, work date, permissions mock and the base the last state reset recorded for it,
+// the "Application Area Setup" rows and the restores of the state reset since PrepareTests) and whether a
+// TestPage finds controls in the Basic and Suite application areas, with the application area it found and after
+// ApplicationArea(''). The CLI logs it as "State probe: ..." and never reports it as a test result. Its error
+// would be the last error of the next test codeunit (the last error carries over between the test codeunits of
+// an AL tool invocation), so it runs before the first state reset, which clears the last error.
+namespace BcDevEnv.TestRunner;
+
+using System.Reflection;
+
+codeunit 50105 "BcDevEnv State Probe"
+{
+    Subtype = Test;
+    TestPermissions = Disabled;
+
+    var
+        FoundTok: Label 'BcDevEnv state probe: control found', Locked = true;
+        DiagnosticErr: Label '%1', Locked = true;
+
+    [Test]
+    procedure ProbeState()
+    var
+        AppAreaSetupReset: Codeunit "BcDevEnv App Area Setup Reset";
+        LoginAppArea: Codeunit "BcDevEnv Login App Area";
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        Diagnostic: TextBuilder;
+    begin
+        Diagnostic.Append(StrSubstNo('ApplicationArea=''%1''; SessionId=%2; ClientType=%3; GuiAllowed=%4', ApplicationArea(), SessionId(), CurrentClientType(), GuiAllowed()));
+        Diagnostic.Append(StrSubstNo('; login hook: %1', LoginAppArea.GetSessionText()));
+        Diagnostic.Append(StrSubstNo('; Company=''%1''; User=''%2''; WorkDate=%3', CompanyName(), UserId(), Format(WorkDate(), 0, 9)));
+        Diagnostic.Append(StrSubstNo('; PermissionsMock=%1', PermissionsMockState()));
+        Diagnostic.Append(StrSubstNo('; recorded mock base=''%1''; per-method reset: %2; System Application Test Library reset: %3', TestStateReset.GetPermissionsMockBaseText(), MethodResetState(), SystemApplicationTestLibraryResetState()));
+        Diagnostic.Append(StrSubstNo('; Application Area Setup: %1', ApplicationAreaSetupRows()));
+        Diagnostic.Append(StrSubstNo('; Application Area Setup restores: %1', AppAreaSetupReset.GetSummaryText()));
+        Diagnostic.Append(StrSubstNo('; TestPage with that area: %1', ProbePage()));
+        Diagnostic.Append(StrSubstNo('; ApplicationArea after the TestPage=''%1''', ApplicationArea()));
+        ApplicationArea('');
+        Diagnostic.Append(StrSubstNo('; after ApplicationArea(''''): ApplicationArea=''%1''', ApplicationArea()));
+        Diagnostic.Append(StrSubstNo(', TestPage: %1', ProbePage()));
+        Error(DiagnosticErr, SingleLine(Diagnostic.ToText()));
+    end;
+
+    local procedure ProbePage(): Text
+    begin
+        exit(StrSubstNo('BasicSuiteField %1, BasicSuiteAction %2, AllField %3, AllAction %4',
+            ProbeControl(1), ProbeControl(2), ProbeControl(3), ProbeControl(4)));
+    end;
+
+    // Opens the probe page and accesses one control; the error that asserterror catches tells whether it was found.
+    local procedure ProbeControl(Control: Integer): Text
+    begin
+        ClearLastError();
+        asserterror OpenAndAccess(Control);
+        if GetLastErrorText() = FoundTok then
+            exit('found');
+        exit(StrSubstNo('not found (%1)', CopyStr(SingleLine(GetLastErrorText()), 1, 200)));
+    end;
+
+    local procedure OpenAndAccess(Control: Integer)
+    var
+        StateProbe: TestPage "BcDevEnv State Probe";
+        Value: Text;
+    begin
+        StateProbe.OpenView();
+        case Control of
+            1:
+                Value := StateProbe.BasicSuiteField.Value();
+            2:
+                StateProbe.BasicSuiteAction.Invoke();
+            3:
+                Value := StateProbe.AllField.Value();
+            4:
+                StateProbe.AllAction.Invoke();
+        end;
+        StateProbe.Close();
+        Error(FoundTok);
+    end;
+
+    // Table 9178 "Application Area Setup" (Base Application) through RecordRef, so this app has no dependency
+    // on it: the primary key (company, profile, user) and the Boolean fields that are set, of the first 10 rows.
+    local procedure ApplicationAreaSetupRows(): Text
+    var
+        AllObj: Record AllObj;
+        SetupRef: RecordRef;
+        PrimaryKey: KeyRef;
+        SetupField: FieldRef;
+        Rows: TextBuilder;
+        Flags: TextBuilder;
+        IsSet: Boolean;
+        RowCount: Integer;
+        Index: Integer;
+    begin
+        AllObj.SetRange("Object Type", AllObj."Object Type"::Table);
+        AllObj.SetRange("Object ID", 9178);
+        if AllObj.IsEmpty() then
+            exit('table 9178 does not exist');
+        SetupRef.Open(9178);
+        if not SetupRef.ReadPermission() then
+            exit('no read permission');
+        if not SetupRef.FindSet() then
+            exit('no rows');
+        repeat
+            RowCount += 1;
+            if RowCount <= 10 then begin
+                Rows.Append(StrSubstNo(' [%1]', RowCount));
+                PrimaryKey := SetupRef.KeyIndex(1);
+                for Index := 1 to PrimaryKey.FieldCount() do begin
+                    SetupField := PrimaryKey.FieldIndex(Index);
+                    Rows.Append(StrSubstNo(' %1=''%2''', SetupField.Name(), SetupField.Value()));
+                end;
+                Clear(Flags);
+                for Index := 1 to SetupRef.FieldCount() do begin
+                    SetupField := SetupRef.FieldIndex(Index);
+                    if (SetupField.Type() = FieldType::Boolean) and (SetupField.Class() = FieldClass::Normal) then begin
+                        IsSet := SetupField.Value();
+                        if IsSet then begin
+                            if Flags.Length() > 0 then
+                                Flags.Append(',');
+                            Flags.Append(SetupField.Name());
+                        end;
+                    end;
+                end;
+                Rows.Append(StrSubstNo(' set: %1', Flags.ToText()));
+            end;
+        until SetupRef.Next() = 0;
+        if RowCount > 10 then
+            Rows.Append(StrSubstNo(' (+%1 more)', RowCount - 10));
+        exit(StrSubstNo('%1 row(s)%2', RowCount, Rows.ToText()));
+    end;
+
+    // The Permissions Mock part (codeunit 50111) reports the state; without it, Permissions Mock is not installed.
+    local procedure PermissionsMockState(): Text
+    var
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        Started: Boolean;
+    begin
+        if not TestStateReset.GetPermissionsMockState(Started) then
+            exit('n/a (Permissions Mock not installed)');
+        if Started then
+            exit('started');
+        exit('stopped');
+    end;
+
+    // Whether the Application Test Library part (codeunit 50110, the per-method reset on Library - Test Initialize's
+    // OnTestInitialize) is compiled, and with the Permissions Mock part, which restarts a stopped permissions mock.
+    local procedure MethodResetState(): Text
+    var
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        PermissionsMockPart: Boolean;
+        ApplicationTestLibraryPart: Boolean;
+        SystemApplicationTestLibraryPart: Boolean;
+    begin
+        TestStateReset.GetCompiledParts(PermissionsMockPart, ApplicationTestLibraryPart, SystemApplicationTestLibraryPart);
+        if not ApplicationTestLibraryPart then
+            exit('not compiled (Application Test Library not installed)');
+        if PermissionsMockPart then
+            exit('compiled (last error, seed, notification context, stopped mock restart)');
+        exit('compiled (last error, seed, notification context; no mock restart: Permissions Mock not installed)');
+    end;
+
+    // Whether the System Application Test Library part (codeunit 50112) is compiled, which resets the single-instance
+    // state of System Application Test Library in the state reset (50102).
+    local procedure SystemApplicationTestLibraryResetState(): Text
+    var
+        TestStateReset: Codeunit "BcDevEnv Test State Reset";
+        PermissionsMockPart: Boolean;
+        ApplicationTestLibraryPart: Boolean;
+        SystemApplicationTestLibraryPart: Boolean;
+    begin
+        TestStateReset.GetCompiledParts(PermissionsMockPart, ApplicationTestLibraryPart, SystemApplicationTestLibraryPart);
+        if SystemApplicationTestLibraryPart then
+            exit('compiled');
+        exit('not compiled (System Application Test Library not installed)');
+    end;
+
+    local procedure SingleLine(Value: Text): Text
+    var
+        Cr: Text[1];
+        Lf: Text[1];
+    begin
+        Cr[1] := 13;
+        Lf[1] := 10;
+        exit(Value.Replace(Cr, ' ').Replace(Lf, ' '));
+    end;
+}

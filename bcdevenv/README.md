@@ -1,0 +1,901 @@
+# bcdevenv
+
+> **Provenance.** Copied from
+> [BusinessCentralApps/bcdevenv](https://github.com/BusinessCentralApps/bcdevenv) at commit
+> `16e2402765a5a1bdebdab3c12fbaf462ea3739b8` (the `bcdevenv/` CLI folder; the AL test-runner
+> app that lived in that repository's `build/testrunner/` is now [`testrunner/`](testrunner/app.json)).
+> Changes made here: the per-codeunit test protocol, DisabledTests support and the AL tool
+> executor in `run-tests` and the runner app (with its optional parts in
+> [`testrunner-optional/`](testrunner-optional)), `build-image` company/server-setting options and license checks, and the
+> SQL Server Express setup script (`container/Install-SqlExpress.ps1`, replacing Chocolatey).
+>
+> In this repository the CLI drives the CI build: the
+> [`RunBcDevEnvPipeline`](../.github/actions/RunBcDevEnvPipeline/action.yaml) action replaces
+> AL-Go's `RunPipeline` in [`_BuildALGoProject.yaml`](../.github/workflows/_BuildALGoProject.yaml)
+> (see [BCApps CI pipeline](#bcapps-ci-pipeline) below).
+
+A **.NET 10 CLI** for building a **self-contained Business Central dev container**
+whose database is created from a **BC platform artifact** — independent of both
+BcContainerHelper and the NAV enlistment.
+
+It exists to avoid the failure you hit with BcContainerHelper: when a new
+platform lands, a *prebuilt* database snapshot no longer matches the platform.
+`bcdevenv` creates a fresh database from the platform artifact you point it at,
+and bakes it **together with that same artifact's binaries** into the image, so
+the schema and the service tier can never drift.
+
+## Depends only on the platform artifact
+
+The tool needs **nothing but a BC platform artifact folder** (the thing you
+download/produce as e.g. `platform_30.0.54604.0`). That artifact ships:
+
+- the **pure-PowerShell BC management modules** (`ServiceTier\...\Service\Admin\`)
+  — `New-NAVApplicationDatabase`, `New-NAVServerInstance`, `Import-NAVServerLicense`,
+  `Publish/Sync/Install-NAVApp`, etc.;
+- the **service-tier** binaries (`ServiceTier\...\Service`) and the **web client**
+  (`WebClient\`).
+
+Because there is no dependency on `INETROOT`, `projects.json`, `BuildDatabase.ps1`
+or any other enlistment code, **this folder can be lifted into its own repository**
+and still build and run. Point the tool at the artifact with `--platform <dir>`
+or the `BCDEVENV_PLATFORM` environment variable.
+
+## How it drives BC
+
+The CLI hosts the BC management cmdlets **in-process** via
+`Microsoft.PowerShell.SDK` (no `.ps1` scripts, no `powershell.exe` subprocess),
+because the management operations are implemented inside `PSCmdlet` classes.
+SQL steps (backup/restore/drop) go directly through **ADO.NET**
+(`Microsoft.Data.SqlClient`). The CLI targets **net10.0**; the platform's own
+assemblies are .NET (the sample artifact reports `dotNetVersion 10.0.12`).
+
+## What create-env produces (important)
+
+`create-env` builds a **fresh, EMPTY platform database** via
+`New-NAVApplicationDatabase` — platform/system tables only. It installs **no
+System/Base Application and no Contoso demo data**, because those are *not* part
+of a platform artifact. You add the app set separately with `install-app`
+(or at `build-image` time); the System/Base Application `.app` packages are
+simply part of that set. This matches the "app install is a separate action"
+design.
+
+## Requirements
+
+- **Windows containers only** for the image (`build-image`/`start`); BC Server is
+  a Windows service and the image OS must match the host kernel. ~8–16 GB RAM.
+- **.NET 10 SDK** to build the CLI.
+- A reachable **SQL Server** for `create-env` (creates the DB) — local or remote.
+- A **BC platform artifact** folder.
+
+## Build
+
+```powershell
+cd <tool-folder>
+dotnet build .\src\BcDevEnv.Cli\BcDevEnv.Cli.csproj -c Release
+```
+
+> The tool folder ships its own `Directory.Build.props/targets`,
+> `Directory.Packages.props`, and `nuget.config`. Inside the NAV monorepo these
+> disable Central Package Management / CoreXT inheritance and restore
+> `Microsoft.PowerShell.SDK` + `Microsoft.Data.SqlClient` from **nuget.org**.
+> In a standalone repo they are harmless and the project builds the same way.
+
+## Install on PATH
+
+```powershell
+$env:PATH = "<tool-folder>;$env:PATH"
+$env:BCDEVENV_PLATFORM = "C:\path\to\platform_30.0.54604.0"
+bcdevenv help
+```
+
+`bcdevenv.cmd` runs the built exe if present, otherwise `dotnet run`.
+
+## Commands
+
+| Command | Phase | Runs where |
+|---|---|---|
+| `create-env` | Create a fresh empty platform DB from the artifact -> `.bak` | host |
+| `verify` | Validate a platform artifact is usable (no SQL/Docker needed) | host |
+| `install-app` | Install a set of `.app` packages into a running NST | host / live NST |
+| `run-tests` | Run the BC test suite against a running NST -> JUnit report | host / live NST |
+| `build-image` | Bake DB + platform binaries + license into a Windows image | host + Docker |
+| `start` / `stop` / `remove` | Container lifecycle | host + Docker |
+| `list` | List environments and images | host |
+| `provision` | (inside image) restore `.bak`, register + configure the NST, license, bake-time apps | container build |
+| `serve` | (inside image) entrypoint: start SQL + NST and keep alive | container runtime |
+| `set-password` | (inside a running NavUserPassword container) set the SUPER user's password from an environment variable | container runtime |
+| `help [cmd]` | Usage | anywhere |
+
+Run `bcdevenv help <command>` for flags.
+
+## Typical flow
+
+```powershell
+$env:BCDEVENV_PLATFORM = "C:\artifacts\platform_30.0.54604.0"
+
+# 1. Create a fresh empty platform database -> .bak (+ manifest).
+bcdevenv create-env --database-name CRONUS --sql-server localhost
+#   -> %LOCALAPPDATA%\bcdevenv\W1-30_0_54604_0\CRONUS.bak (+ manifest.json)
+
+# 2. Install the app set (System/Base Application + your apps, as .app files).
+bcdevenv install-app --env W1-30_0_54604_0 `
+                     --server-instance BC `
+                     --app-file C:\apps\System.app `
+                     --app-file C:\apps\*.app
+
+# 3. Bake DB + artifact binaries into a Windows image.
+bcdevenv build-image --env W1-30_0_54604_0 --tag my-bc:30.0.54604
+
+# 4. Run it.
+bcdevenv start --image my-bc:30.0.54604 --name bc1 --port 7049 --detach
+bcdevenv list
+bcdevenv stop --name bc1
+bcdevenv remove --name bc1 --purge-image
+```
+
+**Authentication.** Images use Windows authentication unless `build-image
+--credential-type NavUserPassword` (`UserPassword` is accepted as the same) is given.
+Then provisioning also creates a SUPER user (`--admin-user`, default `admin`) with a
+random password that is never stored or printed, so the image holds no usable
+password; set the real one in the running container, passing the variable by name
+only, so that it is not on any command line, in the image or in `docker inspect`:
+
+```powershell
+$env:BCDEVENV_ADMIN_PASSWORD = '<password>'
+docker exec -e BCDEVENV_ADMIN_PASSWORD -u ContainerAdministrator bc1 C:\bcdevenv\cli\bcdevenv.exe set-password --user admin
+docker exec -e BCDEVENV_ADMIN_PASSWORD -u ContainerAdministrator bc1 C:\bcdevenv\cli\bcdevenv.exe run-tests --auth UserPassword --user admin --password-env BCDEVENV_ADMIN_PASSWORD ...
+```
+
+The provisioning Windows account stays a SUPER user either way: the management
+service, which `provision`, `install-app` and `set-password` use, always
+authenticates with Windows.
+
+Apps can instead be installed **at bake time** by passing `--app-file` to
+`build-image`. Because `install-app` is a standalone action, the same logic is
+reused in three places: host packaging, container build time, and against a live
+container.
+
+Windows Server Core, the default base image, has no `t2embed.dll` (font
+embedding), and rendering a report as PDF fails without it ("Unable to load DLL
+'T2Embed'"). Pass it with `build-image --system32-file <path>\t2embed.dll`
+(repeatable for other files): the image build copies each such file into
+`C:\Windows\System32` when the base image does not have it, as the official
+images do, checks that it is there, and warns when `t2embed.dll` is missing. The
+official images take it from `install\t2embed.dll` of
+[`nav-docker-install.zip`](https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip).
+
+## Running tests
+
+`run-tests` runs the Business Central test suite against a **running** server
+instance and writes a **JUnit XML** report that CI systems (GitHub Actions,
+Azure DevOps, Jenkins, …) render natively. It exits non-zero when any test
+fails, so it gates a build. Like `install-app`, it depends only on a live NST —
+not on BcContainerHelper.
+
+```powershell
+# Convert an xUnit result document the test toolkit produced (no live server):
+bcdevenv run-tests --from-xml .\TestResults\result.xml --result-file .\TestResults\junit.xml
+
+# Or run live against a container started with 'bcdevenv start':
+bcdevenv run-tests --odata-url http://localhost:7048/BC/ODataV4 `
+                   --service-name BcDevEnvTestRunner `
+                   --result-file .\TestResults\junit.xml
+```
+
+Two input paths, both funnelling through the same result pipeline:
+
+- `--from-xml <file>` (repeatable) / `--results-dir <dir>` — parse existing
+  xUnit result documents and re-emit merged JUnit. Needs no running server, so
+  it is the reliable path in CI: the environment's test toolkit runs the tests
+  and `run-tests` produces the canonical report and pass/fail gate.
+- **live** (default) — invoke the toolkit's runner web service over the NST's
+  OData v4 endpoint (via `HttpClient`, no client-automation DLL), receive the
+  xUnit result and convert it.
+
+The live mode has two protocols against the [`BcDevEnv Test Runner`](testrunner/app.json)
+app (`BcDevEnvTestRunner` web service):
+
+- `run-all` — one `RunAll` call for the whole suite.
+- `per-codeunit` — `PrepareTests` once (selects the test codeunits of `--extension`,
+  filtered by `--test-type` / `--required-test-isolation`, assigns
+  `--test-runner-codeunit-id`, and **removes the DisabledTests entries before anything
+  runs**), then one `RunCodeunit` call per codeunit, so a hanging or crashing codeunit
+  is reported against that codeunit instead of losing the whole run.
+
+With `per-codeunit`, `--executor` chooses who runs the selected tests:
+
+- `odata` (default) — the runner's `RunCodeunit` over OData. That is a web-service
+  (background) session, so tests that open `TestPage`s or report request pages fail.
+- `altool` — the AL tool's `runtests` (`--altool <altool.dll|altool.exe>`), which runs
+  the tests in a **client session** through the development endpoint's test runner
+  hub (`--dev-server`, `--dev-port` 7049, `--server-instance`), so `TestPage`s work.
+  `PrepareTests` still does the selection (test type, isolation pass, DisabledTests),
+  and only the enabled methods of the remaining codeunits are sent
+  (`--testgroups [{"codeunitId":N,"testMethods":[...]}]`, an empty list when no
+  method of the codeunit is disabled; codeunits disabled with `*` are not sent at
+  all). The codeunits go in batches (`--altool-batch-size`, default 20, at most 50 —
+  one state reset method per codeunit, see below) within a
+  total time budget (`--app-timeout-minutes`, default 240). The server's
+  development test runner picks the runner codeunit itself, honouring each
+  codeunit's `RequiredTestIsolation`; `--test-runner-codeunit-id` only applies to
+  the OData executor. The AL tool exits non-zero both for failing tests and for
+  errors, so its JSON output decides: a batch without a parseable result (`data`)
+  — no connection, authentication, version mismatch, timeout — fails every test it
+  contained as an infrastructure error, and a selected test without a result is
+  failed as well. The AL tool's `OnRun` entries are not reported as tests (a failed
+  `OnRun` becomes the reason for the codeunit's missing results).
+
+**State reset (`altool`).** The server's development test runner raises none of the
+`Test Runner` hooks that reset the test state around every test method. What carries
+over from one test codeunit to the next was observed in CI (state probe, failures),
+not taken from server documentation:
+
+- every AL tool invocation (one batch, see below) logs in once: the login hook below
+  counts one client session per batch (8 for the 8 batches of a W1 pass), and the probe
+  of batch k reports k sessions since `PrepareTests`. `SessionId()` still returns a
+  different id in every test codeunit;
+- within a batch, the last error carries over (a codeunit that ended with an error left
+  it for the `GetLastErrorText()` checks of the next codeunits), and so does
+  single-instance state: the permissions mock that a reset starts, and what the login
+  hook recorded at login, which the probe reads;
+- an `ApplicationArea('')` that a reset codeunit set was not seen by the next codeunit,
+  which had the application area that `Application Area Setup` gives (a committed
+  `#BasicHR` row);
+- whether the work date carries over is not verified (the probes saw one work date per
+  job); committed data does.
+
+The platform 30.0 server's code agrees (decompiled from the service tier, not
+documented): its development test runner creates one session per AL tool invocation,
+opens the company once and runs every test codeunit of the batch in it.
+Single-instance codeunits belong to that session's company and nothing resets them
+between test codeunits — as in the single client session of the Test Runner. For every
+test codeunit the server keeps the session's application area from the codeunit's start
+and sets it back after its test methods and at its end (so an application area set
+inside a codeunit does not reach the next one), and it rolls back what a codeunit with
+`RequiredTestIsolation` `None` (the default) or `Codeunit` wrote, in the tenant and the
+application database — isolated storage included, which is kept in the database —
+while a `Disabled` codeunit's writes are committed. It has no work date, random seed or
+last error handling.
+
+So the AL tool runs a reset test codeunit of the `BcDevEnv Test Runner` app before
+**every** test codeunit of every batch and isolation pass: with `--permissions-mock on` (default)
+codeunit 50103 `BcDevEnv Reset Mock Started` before test codeunits whose
+`TestPermissions` is `Disabled` and 50106 `BcDevEnv Reset Full Access` before all
+others; with `--permissions-mock off` 50104 `BcDevEnv Reset Mock Stopped`. The server rejects a
+run that selects the same codeunit/method pair twice ("Test case name '…' is not
+unique"), so each reset codeunit has 50 identical test methods `ResetTestState01` …
+`ResetTestState50` and the n-th reset of a batch selects method n of the reset codeunit
+that position uses
+(`--testgroups [{R1,[ResetTestState01]}, c1, {R2,[ResetTestState02]}, c2, …]`); this is
+why a batch holds at most 50 codeunits. The reset codeunits have
+`RequiredTestIsolation = Disabled`, so the server commits what they change; the
+property applies to them only, every test codeunit keeps its own isolation. They call
+codeunit 50102 `BcDevEnv Test State Reset`, which takes the place of codeunit 130453
+`ALTestRunner Reset Environment` (`BeforeTestMethod`, `ClearLegacyLibraries`,
+`AfterCodeunitRun`) and the permissions mock handling of `Test Runner - Mgt` where that
+reaches the next test codeunit:
+
+- restores table 9178 `Application Area Setup` (when it exists) to the rows it had
+  before the first test, with the permissions mock stopped, and commits (codeunit
+  50108): it deletes rows that are not in the baseline, modifies rows that differ and
+  re-creates missing rows, without triggers. The baseline is captured once per
+  database — by the first `PrepareTests`, or the first reset — with every row (the
+  table is not per company) and every normal field, table extension fields included,
+  through `RecordRef` (no Base Application dependency), and kept in isolated storage
+  (module scope). Without it, a row that a codeunit with `RequiredTestIsolation =
+  Disabled` commits — `APIV1 - Employees E2E` enables the Basic HR experience for the
+  company — gives the codeunits of every later batch the `#BasicHR` application area
+  at login, so `TestPage` controls with `ApplicationArea = Basic, Suite` are "not found
+  on the page". The Test Runner does not need this: it clears the application area
+  before every method;
+- with `System Application Test Library` installed, turns off the testability flags
+  of codeunit 135094 `Environment Info Test Library` (`SetTestabilitySoftwareAsAService`,
+  `SetTestabilitySandbox`, `SetTestabilityPreview`, `SetTestabilityEarlyPreview`, all
+  `false`, the state of a new session) and clears the secret provider and cache of
+  codeunit 135210 `Azure Key Vault Test Library` (`ClearSecrets`). Both libraries keep
+  their state in single-instance codeunits of the System Application, which carries over
+  within a batch, and tests set them without resetting them: `Shpfy Test Shopify` (used
+  by `UnitTestBlockOutOfSupportAPI` in 139563) turns SaaS on and installs a mock key
+  vault, after which the next Shopify codeunits of the batch read an API version expiry
+  date of today and fail with "The Shopify Admin API used by your current Shopify
+  connector is no longer supported". The Test Runner does not reset them either; why
+  upstream runs do not show this cascade is not verified. This goes beyond what 130453
+  and 130301 do. Compiled only when the library is installed (runner part
+  `SystemApplicationTestLibrary`, codeunit 50112, see [Known differences](#bcapps-ci-pipeline));
+- runs codeunit 130301 `Reset State Before Test Run` (random seed 1, the legacy
+  permission catalog, the temporary notification context) and codeunit 132553
+  `Block Changes to System Tables` when they exist (an `AllObj` check, as 130453
+  does, so the runner app does not depend on test libraries). What 130301 resets is
+  single-instance state like the mock's; that it reaches the next test codeunit is not
+  verified individually. The Test Runner runs 130301 before every method; codeunit 50110
+  (below) repeats its random seed and notification context reset per method;
+- leaves the `Permissions Mock` (codeunit 131006) **started** (`on`; the previous
+  codeunit's mock and its assignments are disposed first) or **stopped** (`off`). When
+  started, the mock has **no permission set assignments** before codeunits whose
+  `TestPermissions` is `Disabled` (50103) and the **D365 Full Access base** before all
+  others (50106): codeunit 130302 `Set State Test Run` of `Tests-TestLibraries` (when
+  installed), which the real runner runs after 130301 before every method whose
+  `TestPermissions` is not `Disabled` (`Restrictive` and `NonRestrictive` alike). It
+  assigns `D365 Full Access` with `All Objects`, `Test Tables`, `D365 Basic` and
+  `LOCAL` (when present), the base that `Library - Lower Permissions` lowers from.
+  With the mock off, 130302 never runs. The mock is single-instance state, which
+  carries over within a batch: the probe sees the mock that the reset started, and the
+  failures of tests that need a started mock disappeared with the reset. That the D365
+  Full Access base reaches the next codeunit too is not verified yet;
+- clears the last error (`ClearLastError()`) last, as 130453 does before every test
+  method and `Test Runner - Mgt` after every test, so neither a failed test codeunit nor
+  the state probe leaves an error for the `GetLastErrorText()` or `GetLastErrorCode()`
+  checks of the next codeunit. Without it, `Video Test`, `VAT Group Mgmt Tests`
+  (`ConfirmHandlerYes`) and `Https Mock Email Test` failed on an earlier codeunit's
+  error, and `Filename Reminder Tests` failed because the reminder automation logged the
+  empty `Error('')` that `Filename End-To-End Tests` left behind.
+
+The value comes from `PrepareTests`: while it selects the tests, it records the
+`TestPermissions` that codeunit 130452 `Test Runner - Get Methods` reports for every
+method (its `OnGetTestMethods` event, the value the Test Runner gets when the method
+runs; `Restrictive` when the codeunit does not set the property) and returns, per
+codeunit, the value of its first selected method (`testPermissions`, and
+`testPermissionsMixed` when its selected methods differ). The reset runs once per
+codeunit, so a codeunit whose selected methods differ gets its first selected method's
+base, with a warning; a codeunit without a value (an older runner app) gets 50103 (no
+base), with a warning. The plan line shows the split: `… (permissions mock started; N
+codeunit(s) with the D365 Full Access base, M without assignments)`.
+
+**Per-method last error, random seed and stopped mock (`altool`).** The Test Runner
+clears the last error, runs 130301 (random seed 1, a fresh mock, no temporary
+notifications) and, for methods whose `TestPermissions` is not `Disabled`, 130302 before
+every test method; the reset runs only before the codeunit. The last error of a failed
+method reached the next methods of its codeunit (their `GetLastErrorText()` checks
+failed with it nested in their own message); the random sequence of `Library - Random`
+(single-instance, seeded with 1 by the reset) went on from method to method, so the
+values a method drew depended on the methods that ran before it; and a method that
+stops the mock (`LibraryLowerPermissions.StopLoggingNAVPermissions()`, for
+example in `Expense Permissions Test`) left it stopped for the later methods of its
+codeunit, whose `Library - Lower Permissions` calls then did nothing
+(`SetExactPermissionSet` exits when the mock is not started), so they ran as SUPER.
+Each reset now records the base it applied (no assignments, D365 Full Access, or
+stopped) in isolated storage, committed with its restore. Codeunit 50110 `BcDevEnv Test
+Method Reset` subscribes to `OnTestInitialize` of codeunit 132250 `Library - Test
+Initialize`, which test methods raise first in their `Initialize()`, and, while a run is
+active, clears the last error (as 130453's `BeforeTestMethod` does), sets the random
+seed 1 (`Library - Random`'s `SetSeed(1)`) and clears the temporary notification context
+(`Library - Notification Mgt.`'s `ClearTemporaryNotificationContext`), as 130301 does,
+and, when the mock is stopped, restarts it with that base: 130301 for no assignments,
+130301 and then 130302 for the D365 Full Access base, nothing when the reset stopped the
+mock (`off`). A started mock is never touched, so the assignments a test makes before
+its `Initialize()` (`SetOutsideO365Scope`, `SetO365BusFull`) stay. `PrepareTests` and
+`EndTestRun` forget the base, so nothing is restarted outside a run or before its first
+reset. The reset happens at `Initialize()`, not before the method: random values a
+method draws before its `Initialize()` are drawn again after it, and methods that do not
+raise `OnTestInitialize` (for example the Sustainability and Shopify tests) get none of
+it. The subscriber is compiled when
+`Application Test Library` is installed; the restart of a stopped mock only when
+`Permissions Mock` is installed as well (see [Known differences](#bcapps-ci-pipeline));
+the state probe shows the recorded base and what is compiled.
+
+The reset codeunits are never selected as tests (`PrepareTests` drops them), and
+their results are not counted, not written to the JUnit report and not matched against
+DisabledTests; the log shows `N result(s) (+M state reset(s))` per batch. A reset that
+does not pass, or a batch that does not report the reset method of every position it
+sent (for example an outdated runner app), is an infrastructure error that fails the
+command even with `--allow-failures`. After the last batch the CLI reads the runner's
+`GetStateResetSummary` and logs what the resets committed, for example
+`State reset: 41 state reset(s) committed (41 passed); "Application Area Setup"
+(baseline 0 row(s)) restored by 1 of them: 1 row(s) removed, 0 re-created, 0 modified;
+login ApplicationArea cleared in 3 session(s) (0 had one set at login).`
+Each reset counts itself in the transaction of its restore, so fewer committed than
+passed resets means the server rolled resets back (a runner app whose reset codeunits
+are not `RequiredTestIsolation = Disabled`); that, and a runner app without the action,
+is a warning. See [Known differences](#bcapps-ci-pipeline) for what the reset does not
+cover.
+
+**Login application area (`altool`).** The Test Runner calls `ApplicationArea('')`
+before every test method (codeunit 130453), so its tests see every control whatever
+`Application Area Setup` holds. Here every AL tool invocation logs in, and the Base
+Application's login (`LogInManagement`, on `Company Triggers` `OnCompanyOpen`) sets the
+session's application area from that table: a company row in the baseline — the NL
+`My Company` has the Essential experience, without `#Manufacturing` — hides every
+control outside it ("not found on the page") from the test codeunits, which the
+restore above does not change. So codeunit 50109 `BcDevEnv Login App Area` subscribes
+to the platform's `Company Triggers` `OnCompanyOpenCompleted`, which is raised after all
+`OnCompanyOpen` subscribers, and calls `ApplicationArea('')` in every client session
+(`GuiAllowed`) that opens a company **while a test run is active**: from `PrepareTests`
+until the CLI calls the runner's `EndTestRun` when `run-tests` finishes (also after a
+failure). The AL tool's login is such a session, so the batch starts with the empty
+application area before its first codeunit runs. That it reaches every test codeunit of
+the batch follows from the server's code above (every codeunit starts with the
+application area the previous one started with); it is not observed yet (no W1 login
+had an application area to clear). Only the
+session changes, never the table: tests that read `Application Area Setup` (for example
+the fallback to it when the session's application area is empty) keep the standard
+semantics. The runner's OData sessions are not client sessions and are not affected.
+The summary line above reports the sessions (one per AL tool invocation) and how many
+had an application area at login; fewer sessions than AL tool invocations that reported
+results is a warning, and so is a runner app without `EndTestRun`. Limits: the order
+among `OnCompanyOpenCompleted` subscribers is not defined (one that sets the application
+area after this one wins); **every** client session that opens a company while a run is
+active is affected, interactive web client sessions of any user included; and a run
+that ends without `EndTestRun` (a killed CLI, a lost connection) leaves the hook active
+until a later `run-tests` ends — in CI the container is discarded anyway. It clears the
+application area once per login, not before every method (see
+[Known differences](#bcapps-ci-pipeline)).
+
+**State probe (`altool`, diagnostic, off by default).** With `--state-probe on`, the
+AL tool also runs codeunit 50105 `BcDevEnv State Probe` once per batch, first, before
+the first state reset (`[{50105,[ProbeState]}, {R1,[ResetTestState01]}, c1,
+{R2,[ResetTestState02]}, c2, …]`), so it sees the state that the batch's login left
+and its error is cleared by the first reset instead of reaching a test codeunit. Its only
+test method always fails with one diagnostic line, which the CLI logs as
+`State probe: <batch>: …`: `ApplicationArea()`, what the login hook did in the
+session (`login hook: cleared '<area at login>' at login; N client session(s) since
+PrepareTests, M with an application area at login`), the session id, client type and
+`GuiAllowed`, the company, user and work date, the permissions mock state (when
+compiled with it), the rows of table 9178 `Application Area Setup` (read through
+`RecordRef`, so the runner does not depend on the Base Application) and the restores
+of it so far, and whether a `TestPage` of page 50105 `BcDevEnv State Probe` finds a
+field and an action with `ApplicationArea = Basic, Suite` and with `All` — with the
+current application area and again after `ApplicationArea('')` inside the probe. The
+probe is not a test: it is not counted, not written to the JUnit
+report, not matched against DisabledTests, and a missing probe result (an older runner
+app) is only a warning. Switch it with the action input `testStateProbe` or the AL-Go
+setting `bcdevenvTestStateProbe` (`true`/`on`, or `false`/`off`, the default).
+
+### DisabledTests
+
+`--disabled-tests <root>` (repeatable) together with `--app-name <name>` reads
+`<root>\<App_Name>\*.json` (spaces become `_`), exactly like the repository's
+`src\DisabledTests` layout used by `Get-DisabledTestsForApp`
+(`build\scripts\ParallelTestExecution.psm1`).
+Each file holds `{ "codeunitId", "codeunitName", "method", "bug" }` entries; `method`
+may be `*` (whole codeunit) or contain `*`/`?` wildcards, and names match
+case-insensitively. Matching test methods are disabled in the suite **before**
+execution and appear in the JUnit report as
+`<skipped message="Disabled by DisabledTests"/>`. After the run the result is checked
+against the catalog: a disabled test that still ran, or a test the runner disabled
+without a matching entry, fails the command even with `--allow-failures`. The
+skip report also counts entries that matched no test in the run (stale, or outside
+the selection; listed with `--verbose`).
+
+### JUnit report
+
+Like the reports of AL-Go/BcContainerHelper, every test codeunit is a `<testsuite>`
+named `<id> <name>` (e.g. `139769 Bank Deposit Posting Tests`; just the id when the
+codeunit has no name), which is also the `classname` of its `<testcase>`s, with the
+properties `appName` and `extensionid` (the app id as a lowercase GUID without
+braces). AL-Go's `AnalyzeTests` and the repository's Test Tolerance
+(`build\scripts\TestTolerance`) read these.
+
+Run `bcdevenv help run-tests` for all flags (`--allow-failures`, `--extension`,
+`--test-codeunit`, `--auth`, …). `--auth` is `Windows` (default) or `UserPassword`
+(`NavUserPassword` is accepted as the same) with `--user` and the password from
+`--password-env <variable>` (default `BCDEVENV_ADMIN_PASSWORD`) or `--password`: the
+OData calls send it as Basic authentication and the AL tool gets it in
+`BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD`.
+
+## BCApps CI pipeline
+
+[`.github/actions/RunBcDevEnvPipeline`](../.github/actions/RunBcDevEnvPipeline/action.yaml)
+replaces `microsoft/AL-Go/Actions/RunPipeline` for every AL-Go project
+(`build\projects\*`) built by `_BuildALGoProject.yaml`. The apps are still compiled
+by AL-Go's `CompileApps` (workspace compilation) and the dependency apps still come
+from `DownloadProjectDependencies`. The pipeline logic is in
+[`build\scripts\BcDevEnvPipeline.psm1`](../build/scripts/BcDevEnvPipeline.psm1)
+(Pester tests: `build\scripts\tests\BcDevEnvPipeline.Test.ps1`). For each project and
+build mode it:
+
+1. reads the AL-Go settings of the project/build mode (`country`, `testType`,
+   `companyName`, `doNotRunTests`, `doNotPublishApps`, `enableTaskScheduler`,
+   `enableCleanTestCodeunitExecution`, `runTestsInAllInstalledTestApps`), the
+   dependency apps, the project's `.buildartifacts\Apps` and `.buildartifacts\TestApps`,
+   and orders them by their `app.json` dependencies (apps excluded by the project's
+   `PublishBcContainerApp.ps1` override are not installed);
+2. makes sure the Docker engine is running (starts the `docker` service when it is
+   stopped and waits up to 5 minutes for `docker info` to answer with Windows
+   containers, otherwise fails with a clear error; checked again right before the
+   image build), builds this CLI (`dotnet build`), prepares a local SQL Server
+   Express (`container\Install-SqlExpress.ps1`, also used by the image: Microsoft's
+   SHA256-checked Express with Advanced Services download (engine + Full-Text Search)
+   instead of the Chocolatey feed, setup retried; an attempt succeeds only when setup
+   exits with 0 or 3010, the instance service runs **and** the engine answers
+   `SELECT 1` over shared memory, and every failed attempt prints the setup summary,
+   the instance's ERRORLOG, its SQL Server event log errors, its file layout and the
+   volumes' sector sizes; the runner's instance must still accept a connection after
+   its network protocols are enabled. On runners whose system disk reports a physical
+   sector size above 4 KB, which SQL Server cannot use, the instance (`/INSTANCEDIR`,
+   including the Resource database), its data files and the environment folder
+   (`BCDEVENV_HOME`) go to an expandable VHDX volume with 4 KB sectors instead, because
+   the `ForcedPhysicalSectorSizeInBytes` registry workaround needs a reboot; when setup
+   still fails there, the error says that this workaround was active), downloads the **platform-only** artifact of the
+   `BCPlatform` version in `build\Packages.json` (with retries; a truncated or
+   invalid zip is deleted and downloaded again) and compiles the test runner app
+   with that platform's AL compiler;
+3. `create-env` creates an **empty** platform database (no Cronus/demo data),
+   `build-image` provisions it with all the apps plus the test runner (the image
+   also gets `t2embed.dll`, see below), sets the
+   database's application family to the project's `country` (upper-cased; `w1`/`base`
+   = `W1`), so that country-specific feature keys (e.g. FR `Payment`, GB
+   `VATReverseCharge`) and `EnvironmentInformation.GetApplicationFamily()` match a
+   localized environment, creates the
+   company and runs the same company codeunits as
+   `build\scripts\ImportTestDataInBcContainer.ps1` (`Company-Initialize` for every
+   test type, which upstream's client-session login runs for `UnitTest`; plus the
+   Contoso demo data for `IntegrationTest`/`Uncategorized`; each call may take up to
+   60 minutes, `build-image --company-codeunit-timeout <minutes>`, instead of the
+   management API's 600-second default, and is not retried), maps the build account
+   to a SUPER user and creates the SUPER user `admin`: the container uses
+   **NavUserPassword** authentication (`build-image --credential-type NavUserPassword`),
+   like AL-Go's `Run-AlPipeline` containers. The password is generated for each run
+   (32 random characters), registered with `::add-mask::` (written to the runner's own
+   output, so it is not in `BuildOutput.txt` either) and kept in the action process's
+   environment; it is never in the image (provisioning gives `admin` a discarded random
+   password), on a command line or in the container's configuration. `start` runs the
+   container (the server's URL
+   reservations include the report rendering side service's port 7084 and the
+   management API port, so the reporting service can start and tests can render
+   reports), `bcdevenv set-password` sets the password in the running container
+   (`docker exec -e BCDEVENV_ADMIN_PASSWORD`, which passes the variable by name), and
+   every later call authenticates as `admin`: the OData readiness check and the
+   BcDevEnvTestRunner calls with Basic authentication, the AL tool with
+   `BC_SERVER_USERNAME`/`BC_SERVER_PASSWORD`. The API tests' calls to the server's own
+   endpoints authenticate with the test user's name and a web service access key
+   (`Microsoft Test Auth Provider`, 131022, which applies to on-premises
+   NavUserPassword), as in AL-Go's containers, so the server's own account is no longer
+   mapped to a user (that is only done with Windows authentication);
+4. selects the test apps like the project's `.AL-Go\RunTestsInBcContainer.ps1`
+   override (the test-type bucket from `build\projects.json`/`build\groups.json` when
+   the project uses `Invoke-PerProjectTestRun`, otherwise the project's own test apps) and runs
+   `run-tests --protocol per-codeunit` per app and isolation pass (the codeunits that
+   require isolation `Disabled` separately), with every `DisabledTests` folder of the
+   repository (`src\DisabledTests`) copied into the container. `src\DisabledTests`
+   also has the entries upstream `microsoft/BCApps` `main` added up to commit
+   `26849205a` (83 entries in 11 apps' files); the entries `main` removed since then
+   are kept, because the fork's test code does not have the upstream changes that
+   re-enabled those tests. The tests are executed
+   by the **AL tool** (`--executor altool`, see [Running tests](#running-tests)): the
+   `Microsoft.Dynamics.BusinessCentral.Development.Tools` package is downloaded from
+   nuget.org (with retries), its `tools\net10.0\any` folder is copied into the
+   container (`C:\altool`) and run with the image's .NET host, after a check that the
+   development endpoint (port 7049) accepts connections. The version defaults to
+   `30.0.44.47290-beta`: `30.0.42.60748-beta` refuses every call against the
+   `BCPlatform` 30.0 server ("supports Web API ≤ 7.0, debuggers ≤ 8.0"; the server
+   has Web API 8.0 and debugger 9.0). Each app has a time budget of 240 minutes, and a
+   state reset runs before every test codeunit (see [Running tests](#running-tests);
+   the permissions mock part is on by default).
+   Override them with the action inputs `testExecutor` (`altool`/`odata`; `odata`
+   is the previous web-service executor, kept as a fallback), `alToolVersion`,
+   `appTestTimeoutMinutes`, `testPermissionsMock` (`on`/`off`) and `testStateProbe`
+   (`on`/`off`, diagnostic), or the AL-Go settings `bcdevenvTestExecutor`,
+   `bcdevenvAlToolVersion`, `bcdevenvAppTestTimeoutMinutes`,
+   `bcdevenvTestPermissionsMock` and `bcdevenvTestStateProbe` (`true`/`false`).
+   The log names the executor of every app and pass (`Tests: <app> - <pass> (executor
+   altool <version>)`), the permissions mock setting and, when on, the state probe;
+5. applies upstream's **Test Tolerance** (`build\scripts\TestTolerance\TestTolerance.psm1`,
+   unchanged) when tests failed. It downloads the latest unexpired artifact
+   `unstable-tests-<branch>` of `microsoft/BCApps` through the GitHub REST API with the
+   action input `token` (default: the workflow's `GITHUB_TOKEN`; the token is removed
+   from the environment before any other process starts), for the branch upstream's
+   `Get-ToleranceBranch` resolves (the pull request's base branch or the pushed branch
+   when it is `main` or `releases/*`, otherwise `main`). When every failed test of a
+   test app (across its isolation passes, as upstream checks an app's results file) is
+   in that list, matched on extension id, codeunit id and method (so country apps that
+   reuse a codeunit id stay apart), those failures are rewritten in the app's reports
+   as skipped test cases `Failed (tolerated by Test Tolerance)` named
+   `<method> (tolerated)`, and each is logged as
+   `TOLERATED: <app> :: <extension id> :: <codeunit> :: <method> - <reason>`; when any
+   failed test of the app is not in the list, none of its failures is tolerated.
+   Differences to upstream's `RunTestsInBcContainer.ps1`: the fork has no unstable tests
+   list of its own (upstream's `UpdateUnstableTests`/`AddUnstableTestsFromRun` workflows
+   only run in `microsoft`'s repository), so the list of `microsoft/BCApps` is used
+   (override it with the action input `unstableTestsRepository` or the AL-Go setting
+   `bcdevenvUnstableTestsRepository`, `owner/name`, or `none` to switch Test Tolerance
+   off); it applies to every event, not only to pull requests, because the fork's test
+   jobs also run on push and `workflow_dispatch` and its runs do not feed upstream's
+   detection; and when the list cannot be downloaded (no token, an HTTP error, no
+   unexpired artifact) a warning with the cause is written and no failure is tolerated,
+   without failing the step for that. Whether the fork's workflow token may download
+   another repository's artifacts is not verified yet (GitHub's artifact download
+   endpoints require authentication even for public repositories); if the warning shows
+   401/403, pass a token that can read public repositories with the `token` input;
+6. merges the JUnit reports into `<project>\TestResults.xml` (read by AL-Go's
+   `AnalyzeTests`) and `<project>\.buildartifacts\TestResults.xml` (uploaded test
+   results artifact); the log is written to `<project>\BuildOutput.txt`, and on
+   failure the container's event log to `<project>\ContainerEventLog.evtx`.
+
+The step fails on any failing test that Test Tolerance does not tolerate, on
+runner/DisabledTests violations, on a
+missing report, and when test apps were selected but no test ran. It does not use
+BcContainerHelper; the surrounding AL-Go steps (`CompileApps`, `PipelineCleanup`, …)
+are unchanged and still do, except that `PipelineCleanup` is `continue-on-error`:
+hosted runners are sometimes started without a running Docker engine, and its
+failure would otherwise fail a compile-only job (and, through `Build1`, skip every
+test job).
+
+**License.** An empty platform database holds no license, and Business Central does
+not publish apps without one. The action reads the `licenseFileUrl` entry of the
+AL-Go secrets (map it to another secret with the AL-Go `licenseFileUrlSecretName`
+setting); the value may be an http(s) URL, a gzip+base64-encoded license (`H4sI…`)
+or a path. Without it, a warning is written and — as AL-Go does without
+`licenseFileUrl` — the CRONUS license of the AL-Go application artifact is used
+(the artifact resolved from the `artifact` setting, e.g. `sandbox/<version>/base`;
+the entry named by its `manifest.json` `licenseFile`, normally `Cronus.bclicense`,
+read with HTTP range requests, falling back to downloading the whole artifact).
+Licensing errors during provisioning are reported as such. `build-image` itself
+refuses to bake apps into a `create-env` database without `--license`.
+
+**Font embedding (`t2embed.dll`).** Windows Server Core, the image's base, has no
+`t2embed.dll`, and the server's report rendering fails without it when a report is
+saved as PDF ("Unable to load DLL 'T2Embed'", e.g. `Financial Report Mgt.` `Print`
+and the reminder automation tests). Like the official images (nav-docker's
+`navinstall.ps1`), the image gets it in `C:\Windows\System32` when it is missing
+(`build-image --system32-file`). The action reads only the `install/t2embed.dll`
+entry of the official images' install archive
+[`nav-docker-install.zip`](https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/prerequisites/nav-docker-install.zip)
+with HTTP range requests (falling back to downloading the whole archive, with
+retries) and checks that it is a DLL; it is never committed to the repository.
+Override the source with the action input `t2embedUrl` or the AL-Go setting
+`bcdevenvT2EmbedUrl` (a zip archive with a `t2embed.dll` entry, or the DLL itself).
+When it cannot be obtained, a warning is written and the image is built without it,
+so only PDF rendering fails. The image build logs `Copied t2embed.dll to
+C:\Windows\System32\t2embed.dll` (or that the file already exists). The Visual C++
+redistributable, which the official images also install, is not installed: no test
+failure has pointed to it.
+
+**Not supported** (the step fails with an explicit message): projects without
+workspace compilation, `testType` `Legacy` (demo data generated through a page
+action), and the RU projects (company initialization must be interleaved with the
+app installation). Upgrade testing from the previous release is not performed.
+
+**Known differences from AL-Go/BcContainerHelper.** The AL tool runs the tests in a
+client session through the development endpoint's test runner hub, while
+BcContainerHelper drives the test tool page (page 130455) through the web client's
+client services endpoint. The hub only lets the caller choose the codeunits and
+methods; the server's development test runner chooses the runner codeunit, so the
+AL hooks of the `Test Runner` app's runners 130450/130451 (`Test Runner - Mgt`,
+codeunit 130453 `ALTestRunner Reset Environment`) do not run. The state reset (see
+[Running tests](#running-tests)) approximates them **per test codeunit, not per test
+method**. The methods of a test codeunit run one after the other in the AL tool's
+session, so the following still carries over from one method to the next:
+
+- the session state a method changes: application area and work date (the login hook
+  clears the application area once per login, where the Test Runner clears it before
+  every method);
+- the random sequence and the temporary notification context, in methods that do not
+  raise `OnTestInitialize` or before their `Initialize()`: codeunit 50110 sets the seed 1
+  and clears the context there (see [Running tests](#running-tests)), the Test Runner
+  (130301) before every method. A method without `OnTestInitialize` goes on with the
+  sequence that the reset seeded with 1 before the codeunit, so the values it draws
+  depend on the methods that ran before it in the codeunit;
+- the last error, in methods that do not raise `OnTestInitialize` or before their
+  `Initialize()`: codeunit 50110 clears it there (see [Running tests](#running-tests)),
+  the Test Runner before every method. A codeunit without `OnTestInitialize` — for
+  example `VAT Group Mgmt Tests`, whose `ConfirmHandlerYes` asserts an empty
+  `GetLastErrorText()` — starts clean after the reset, but after one failed method its
+  later methods fail on that method's error;
+- permission set assignments a method makes (`PermissionsMock.Set`,
+  `LibraryLowerPermissions.*`): the real runner starts a fresh mock for every method
+  (and, unless the method's `TestPermissions` is `Disabled`, assigns the D365 Full
+  Access base again). Here only a mock that an earlier method **stopped** is restarted
+  with the codeunit's base, when the next method raises `OnTestInitialize` (see
+  [Running tests](#running-tests)); a mock that is still **started** keeps the
+  assignments, so with the mock on, a later method of the same codeunit may run
+  with the permissions an earlier method lowered or assigned instead of the base, and
+  tests that passed only because they ran as SUPER may now fail. With the mock off
+  (stopped), permission tests run as SUPER and
+  `PermissionsMock.ClearAssignments` without `Start` fails ("A DotNet variable has not
+  been instantiated"), as before the reset existed (about 31 + 8 failures per job).
+
+Between test codeunits the reset restores only `Application Area Setup`; other data
+that codeunits with `RequiredTestIsolation = Disabled` commit stays for the later
+codeunits, as with the Test Runner. The AL tool logs in again for every batch, and that
+login computes the session's state from such data (except the application area, which
+the login hook clears), which the Test Runner's single login does not. The work date
+that 130453 restores after every codeunit is not restored here; whether a work date
+that a codeunit sets reaches the next codeunit of its batch is not verified (the probes
+saw one work date per job).
+
+Single-instance state also carries over between the test codeunits of a batch (one
+session, see [Running tests](#running-tests)). The reset resets only the state of
+`System Application Test Library` (Environment Info testability flags, Azure Key Vault
+secrets), and only when that app is installed: the action then adds the runner part
+`SystemApplicationTestLibrary` and its dependency (see below), and logs it.
+Single-instance state of other apps is not reset, because the runner does not
+depend on them, and module isolated storage of another app cannot be cleared from the
+runner. Known cases, from the CI failures (cause not verified for each test):
+
+- Subscription Billing's `Document Change Management` sets its single-instance
+  `SkipContractSalesHeaderModifyCheck`/`SkipContractPurchaseHeaderModifyCheck` flags
+  before a document copy and resets them after it, so an error in between leaves them
+  set for the later codeunits (139692 ×2, 148157, 139912, 139913: `asserterror`
+  without an error);
+- the Shopify connector caches the API version expiry date in its module isolated
+  storage for 10 days. An isolated codeunit's write is rolled back with the codeunit,
+  but one that a codeunit with `RequiredTestIsolation = Disabled` commits stays for the
+  later codeunits; the reset cannot clear it;
+- without `OnTestInitialize` there is no per-method seed (see above): the Sustainability
+  tests 148184, 148186, 148187, 148190 and 148206, and 139882 (`APIV2 - Salesperson/Purch
+  E2E`, a `RandDec` commission of "4.80" read back as "4.8"), fail in ways that look
+  seed-dependent;
+- 139624, 139657 and 135033 (`Password Dialog Test`, the `OK` of the change-password
+  dialog in a modal page handler) fail with `asserterror` raising no error, and 134685
+  (`Email Test.FailedAttachFromRelatedRecords`) reaches its page handler, which fails
+  with "Queue underflow", where the test expects an error first; no cause in the runner
+  has been found.
+
+The container's client services use `NavUserPassword` authentication, like AL-Go's
+`Run-AlPipeline`. Under Windows authentication (the previous setting) `User Permissions
+Library.CreateSuperUser` (System Application Test Library) gave an on-premises user
+the Windows account `SID()` of the user that runs the tests, so 132925 (`Plan
+Configuration E2E Test.CustomizePermissionSetAdd`) failed with "The same Windows
+Account can be connected to only one Business Central user." (it had passed while an
+earlier codeunit left `SetTestabilitySoftwareAsAService(true)` set, because the
+library skips the Windows account on SaaS). With the tests signed in as the
+NavUserPassword user `admin`, as in AL-Go's containers, 132925 is expected to pass;
+not yet verified in CI.
+
+A generic fix for single-instance state would be one AL tool invocation per test
+codeunit, so that every codeunit gets a new session. It is not implemented: every
+codeunit would pay for a connection and a company open, and the Test Runner also runs
+all codeunits in one session.
+
+The D365 Full Access base (codeunit 130302) is chosen per codeunit from its first
+selected method's `TestPermissions` (see [Running tests](#running-tests)); it needs
+`Tests-TestLibraries` in the install set, otherwise those codeunits also start without
+assignments. Codeunit 132553 is in `Prevent
+Metadata Updates Library`, which the pipeline does not publish, so it normally does
+not run. The mock part is compiled into the runner only when the `Permissions Mock`
+app is in the install set (the action adds the runner part `PermissionsMock`,
+codeunit 50111, and its dependency, and logs it); otherwise the reset does not
+control the mock. Switch the
+mock part with the action input `testPermissionsMock` or the AL-Go setting
+`bcdevenvTestPermissionsMock` (`true`/`on`, the default, or `false`/`off`) to compare
+both.
+
+The per-method part (codeunit 50110: the last error, the random seed, the temporary
+notification context) is compiled only when `Application Test Library` is in the install
+set: the action then also adds the runner part `ApplicationTestLibrary` and that
+dependency, and logs it, so projects without it (System Application, Business
+Foundation) are unaffected. Its restart of a stopped mock also needs `Permissions Mock`
+(the `PermissionsMock` part). It covers only methods that raise `OnTestInitialize` (in
+practice through their `Initialize()`), and it runs there, not before the method: calls
+that a method makes on the stopped mock before its `Initialize()` (for example
+`SetOutsideO365Scope`) do nothing, and the mock then starts with the base; an error that
+a method raises and catches before its `Initialize()` is cleared there; random values a
+method draws before its `Initialize()` are drawn again after it; and a method that stops
+the mock and calls `Initialize()` again gets it restarted. Its order among other
+`OnTestInitialize` subscribers is not defined. The restarts are not counted: a count
+written in the test's session would be rolled back by its test isolation, and a commit
+there would change the test's transaction.
+
+**Optional runner parts.** The code that needs `Permissions Mock`, `Application Test
+Library` or `System Application Test Library` lives outside the runner app, in
+[`testrunner-optional/`](testrunner-optional) (`PermissionsMock`: codeunit 50111,
+`ApplicationTestLibrary`: 50110, `SystemApplicationTestLibrary`: 50112), so the runner
+app compiles on its own without these apps. For each of them in the install set, the
+action copies the part into `optional/<part>` of its copy of the runner and adds the
+app as a dependency to that copy's `app.json` (`Set-BcDevEnvRunner*` in
+`BcDevEnvPipeline.psm1`), and logs `(runner part <part>)`. The state reset (50102)
+raises one internal event per optional step, in its fixed order (the order of the
+subscribers to one event is not defined), and 50110 asks it to restart a stopped mock
+the same way; without its part an event does nothing. The state probe learns from
+another event which parts are compiled. Preprocessor symbols are not used for this:
+the repository's `TestPreprocessorSymbols` check (Verify App Changes) allows only
+`CLEANnn`/`CLEANSCHEMAnn` symbols in AL files.
+
+The codeunit-level events of `Test Runner - Mgt` (codeunit 130454),
+`OnBeforeCodeunitRun` and `OnAfterCodeunitRun`, are never raised either. They are
+local integration events, so nothing outside codeunit 130454 can raise them, and the
+reset cannot stand in for their subscribers. In `src\Apps`, System Application,
+Business Foundation, `src\Tools` and `src\Layers\W1\Tests` the only subscriber outside
+the `Test Runner` app is Quality Management's codeunit 139979 `Qlty. Permission Test
+Fixture`, which creates the test users of codeunit 139957 in `OnBeforeCodeunitRun`;
+without them, 9 of its tests fail with "The given key was not present in the
+dictionary."
+
+Sending a non-empty
+method list (codeunits with some methods disabled) has not been verified against a
+live server yet. With `testExecutor: odata` the tests run in a web-service session
+instead, where `TestPage`s, report request pages and UI handlers fail with
+`NotSupportedException`/"cannot be used in background or server sessions" errors,
+and tests that expect the data a client login creates fail (`System Initialization`
+records the signup context and the user's login information only for client
+sessions; e.g. `User Login Time Tracker Test`, `System Initialization Test`); whether
+the AL tool's test session creates that data has not been verified yet.
+Some tests also depend on data that only specific upstream setups create (for
+example the AMC banking license user), and are not seeded generically.
+
+The build jobs of the `CI/CD` and `Pull Request Build` workflows run on `windows-2022`
+(`gitHubRunner` in the `repositories: ["BCApps"]` conditional settings of
+`.github\CICD.settings.json` and `.github\Pull Request Build.settings.json`) because
+the container image is based on `servercore:ltsc2022` and runs with process
+isolation. The workflow settings files are merged after the project settings, so
+this replaces the projects' `GitHub-BCAppsPL` runner. AL-Go matches `repositories`
+against the repository name without its owner, so the condition cannot tell a fork
+from `microsoft/BCApps`.
+
+## Environment artifacts
+
+Each environment lives under `%LOCALAPPDATA%\bcdevenv\<name>\`
+(override with `BCDEVENV_HOME`) and holds the `.bak` and a `manifest.json`
+recording the platform version, the artifact path, the database/instance names,
+and the installed app files.
+
+## Hosting in a separate repository
+
+The folder is self-contained: copy it out, keep the same layout
+(`src\BcDevEnv.Cli`, `container\Dockerfile` + `container\Install-SqlExpress.ps1`,
+`bcdevenv.cmd`, the `Directory.*`
++ `nuget.config` files), and it builds and runs unchanged. The only external
+input at runtime is the platform artifact (`--platform` / `BCDEVENV_PLATFORM`).
+`build-image` locates the tool root from the running executable, so it also
+works from a standalone checkout (override with `BCDEVENV_TOOL_ROOT`).
+
+## Key environment variables
+
+| Variable | Purpose |
+|---|---|
+| `BCDEVENV_PLATFORM` | Platform artifact folder (same as `--platform`) |
+| `BCDEVENV_HOME` | Where environments are stored (default `%LOCALAPPDATA%\bcdevenv`) |
+| `BCDEVENV_SQL_SERVER` / `BCDEVENV_SQL_INSTANCE` | SQL target for `create-env` |
+| `BCDEVENV_MGMT_DIR` | Management-module dir baked into the container image |
+| `BCDEVENV_SERVICE_FOLDER` / `BCDEVENV_WEBCLIENT_FOLDER` | Override staged binaries |
+| `BCDEVENV_TOOL_ROOT` | Override the tool-root autodetection for `build-image` |
+| `BCDEVENV_ADMIN_PASSWORD` | Password of the NavUserPassword user, read by `set-password` and `run-tests --auth UserPassword` (default `--password-env`) |
+
+## Not runnable end-to-end in every environment
+
+The CLI builds cleanly (`dotnet build -c Release`, 0 warnings) and the
+artifact-only path is validated on-box: the artifact's management module imports
+in-process with no errors and exposes the DB/server/app cmdlets, and the SQL
+client connects. A full image build/run must happen on a Windows-container host.
+Caveats:
+
+- The image installs SQL Server Express with `container\Install-SqlExpress.ps1`
+  (Microsoft's `SQLEXPRADV_x64_ENU.exe`, Express with Advanced Services, pinned by
+  SHA256, features `SQLENGINE,FULLTEXT`: BC creates full-text indexes when a company
+  is created); update its URL and hash together when moving to another SQL Server
+  Express release. Its sector-size mitigation (a VHDX volume for the instance and its
+  data files when the system disk reports physical sectors above 4 KB) needs
+  `diskpart`; where it cannot create the virtual disk (e.g. inside a container) setup
+  uses the default folders. A setup exit code other than 0/3010 fails the attempt even
+  when the service appears to run (setup's 0x851A001A, "Wait on the Database Engine
+  recovery handle failed", can leave a service that runs briefly and then fails to
+  restart). `Install-SqlExpress.ps1 -DiagnosticsOnly` prints an instance's diagnostics
+  without installing anything; the pipeline runs it when the instance does not accept
+  a connection.
+- Registering an NST from baked binaries on a plain Windows base image may need
+  manual service setup, since `New-NAVServerInstance` normally expects the
+  product installed.
+
+## Tests
+
+Unit tests (`src\BcDevEnv.Cli.Tests`) cover arg parsing, path resolution and the
+env manifest. They need no artifact, SQL or Docker and run in the `CI` workflow.
+
+Integration tests (`src\BcDevEnv.Cli.IntegrationTests`) exercise the real product
+against real platform artifacts. They **determine the platform version from the
+platform index**
+(`https://bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net/platform/indexes/platform.json`)
+and run one case **per major version, taking the latest available** (e.g. latest
+28, latest 29, latest 30). Each case downloads the artifact and runs
+`bcdevenv verify`, which imports the BC management modules in-process and asserts
+the cmdlets `create-env` (container database + server instance) and `install-app`
+depend on are present — i.e. the "create a container + install an app" capability,
+validated without needing SQL or Docker.
+
+They are **off by default** so `dotnet test` stays hermetic; enable them with
+environment switches:
+
+| Variable | Purpose |
+|---|---|
+| `BCDEVENV_RUN_INTEGRATION=1` | Enable the index + artifact-download tests |
+| `BCDEVENV_MAJORS` | Comma-separated majors to test (default `28,29,30`; the workflow auto-detects from the index) |
+| `BCDEVENV_ARTIFACT_CACHE` | Where artifacts are downloaded/extracted (default `%TEMP%\bcdevenv-artifacts`) |
+| `BCDEVENV_RUN_CONTAINER_TESTS=1` | Additionally run the heavy end-to-end `create-env` -> `build-image` -> `start` path (needs SQL + Docker Windows containers) |
+
+```powershell
+$env:BCDEVENV_RUN_INTEGRATION = "1"
+dotnet test .\src\BcDevEnv.Cli.IntegrationTests\BcDevEnv.Cli.IntegrationTests.csproj -c Release
+```
+
+The integration workflows of the source repository are not part of this repository;
+here the CLI is exercised end to end by the CI build (`RunBcDevEnvPipeline`).

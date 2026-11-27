@@ -168,7 +168,9 @@
     "src/Layers/*",
     "src/DisabledTests/*",
     ".github/workflows/PullRequestHandler.yaml",
-    ".github/workflows/_BuildALGoProject.yaml"
+    ".github/workflows/_BuildALGoProject.yaml",
+    ".github/actions/RunBcDevEnvPipeline/*",
+    "bcdevenv/*"
   ],
   "PullRequestTrigger": "pull_request",
   "ALDoc": {

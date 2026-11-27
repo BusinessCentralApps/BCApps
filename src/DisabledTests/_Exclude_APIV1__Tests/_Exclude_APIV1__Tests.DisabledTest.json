@@ -60,6 +60,11 @@
     "method": "TestPurchaseInvoiceWithPaymentDiscount"
   },
   {
+    "codeunitId": 139733,
+    "codeunitName": "APIV1 - Attachments E2E",
+    "method": "TestCreateGLEntryAttachment"
+  },
+  {
     "codeunitId": 139730,
     "codeunitName": "APIV1 - GLEntries E2E",
     "method": "TestGetGLEntries"

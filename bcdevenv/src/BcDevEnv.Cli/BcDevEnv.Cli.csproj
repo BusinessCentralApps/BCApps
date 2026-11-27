@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- .NET 10; the BC Server / management assemblies target net8.0 and load
+         fine on a net10.0 host via roll-forward. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- BC Server + the management module are win-x64 only. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>bcdevenv</AssemblyName>
+    <RootNamespace>BcDevEnv.Cli</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Microsoft.Data.SqlClient requires globalization (ICU); invariant mode throws at Open(). -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- Package metadata (used by the bcdevenv-release workflow's 'dotnet pack'). -->
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <PackageId>BcDevEnv.Cli</PackageId>
+    <Authors>BusinessCentralApps</Authors>
+    <Company>BusinessCentralApps</Company>
+    <Description>Self-contained Business Central dev-container CLI that builds a BC dev container from a platform artifact, independent of BcContainerHelper.</Description>
+    <PackageTags>business-central;bc;dynamics365;dev-container;al</PackageTags>
+    <RepositoryUrl>https://github.com/BusinessCentralApps/bcdevenv</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Condition="Exists('..\..\README.md')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- In-process PowerShell host used to invoke the BC management cmdlets
+         (server instance, license, app publish/sync/install). This is NOT a
+         powershell.exe subprocess and there are no .ps1 scripts in the CLI. -->
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.6" />
+    <!-- Direct SQL for .bak restore/backup/drop/exists (no cmdlet needed). -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+  </ItemGroup>
+
+</Project>
